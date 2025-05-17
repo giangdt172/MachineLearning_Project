@@ -1,0 +1,6 @@
+{
+    "file_path": "pytorch-stable-diffusion-main/sd/encoder.py",
+    "signature": "def VAE_Encoder.forward(self, x, noise):",
+    "docstring": "asdasdas",
+    "timestamp": "2025-05-17 21:37:39"
+}

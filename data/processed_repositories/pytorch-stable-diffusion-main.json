@@ -1245,8 +1245,8 @@
                 "has_docstring": false,
                 "complexity": 10,
                 "outgoing_calls": [
-                    "rescale@pytorch-stable-diffusion-main/sd/pipeline.py",
                     "get_time_embedding@pytorch-stable-diffusion-main/sd/pipeline.py",
+                    "rescale@pytorch-stable-diffusion-main/sd/pipeline.py",
                     "WIDTH = 512",
                     "HEIGHT = 512",
                     "LATENTS_WIDTH = WIDTH // 8",
