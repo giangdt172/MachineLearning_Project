@@ -1,0 +1,6 @@
+{
+    "file_path": "pytorch-stable-diffusion-main/sd/ddpm.py",
+    "signature": "def DDPMSampler.__init__(self, generator: torch.Generator, num_training_steps, beta_start: float, beta_end: float):",
+    "docstring": "\u00e1dasdasda",
+    "timestamp": "2025-05-17 18:02:11"
+}

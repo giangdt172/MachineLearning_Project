@@ -4,7 +4,7 @@ import tempfile
 import zipfile
 import shutil
 import json
-from MachineLearning_Project.parse_repo import process_repo  # Import process_repo directly
+from parse_repo import process_repo 
 
 # Define data folder paths
 DATA_FOLDER = "data"
@@ -13,7 +13,7 @@ PROCESSED_REPO_PATH = os.path.join(DATA_FOLDER, "processed_repositories")
 def process_uploaded_repository(repo_file):
     """Process an uploaded repository and save its structure"""
     if repo_file is None:
-        return "Please upload a repository ZIP file first.", ""
+        return "Please upload a repository ZIP file first.", "", []
     
     # Create data directories if they don't exist
     os.makedirs(DATA_FOLDER, exist_ok=True)
@@ -31,7 +31,7 @@ def process_uploaded_repository(repo_file):
         processed_data = process_repo(temp_dir)
         
         if processed_data is None:
-            return f"Repository {repo_name} does not meet processing criteria.", ""
+            return f"Repository {repo_name} does not meet processing criteria.", "", []
         
         # Save the processed data to the data folder
         output_file = os.path.join(PROCESSED_REPO_PATH, f"{repo_name}.json")
@@ -39,7 +39,8 @@ def process_uploaded_repository(repo_file):
             json.dump(processed_data, f, ensure_ascii=False, indent=4)
         
         # Extract repository structure overview
-        file_count = len(processed_data.keys())
+        file_paths = list(processed_data.keys())
+        file_count = len(file_paths)
         func_count = sum(len(f.get("functions", [])) for f in processed_data.values())
         class_count = sum(len(f.get("classes", [])) for f in processed_data.values())
         
@@ -59,10 +60,13 @@ Structure Overview:
 - {class_count} classes found
 - {len(import_statements)} unique third-party imports
 """
-        return "Processing complete!", summary
+        # Create a dictionary for the dropdown to use
+        file_options = {path: path for path in file_paths}
+        
+        return "Processing complete!", summary, file_options
     
     except Exception as e:
-        return f"Error processing repository: {str(e)}", ""
+        return f"Error processing repository: {str(e)}", "", {}
     finally:
         # Clean up
         shutil.rmtree(temp_dir)
@@ -84,17 +88,24 @@ with gr.Blocks() as app:
             status_text = gr.Textbox(label="Status", placeholder="Upload a repository to begin...", interactive=False)
             repo_info = gr.Textbox(label="Repository Information", placeholder="Repository details will appear here...", 
                                   lines=10, interactive=False)
+            
+            # Improved dropdown component
+            files_dropdown = gr.Dropdown(
+                label="Select Python File", 
+                choices=[], 
+                interactive=True,
+                value=None
+            )
     
     # Event handler for processing repository
     process_btn.click(
         process_uploaded_repository, 
         inputs=repo_file, 
-        outputs=[status_text, repo_info]
+        outputs=[status_text, repo_info, files_dropdown]
     )
 
 # Launch the app
 if __name__ == "__main__":
     app.launch()
 
-if __name__ == "__main__":
-    app.launch()
+
