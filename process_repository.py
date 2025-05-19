@@ -2,7 +2,7 @@ import os
 import json
 import shutil  
 import stat
-from MachineLearning_Project.parse_repo import *  
+from parse_repo import *  
 
 # RAW_REPO_PATH = "../data/raw_repositories"
 # PROCESSED_REPO_PATH = "../data/temp/processed_repositories"

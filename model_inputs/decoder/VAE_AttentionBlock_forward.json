@@ -1,0 +1,7 @@
+{
+    "file_path": "pytorch-stable-diffusion-main/sd/decoder.py",
+    "function_name": "VAE_AttentionBlock.forward",
+    "signature": "def VAE_AttentionBlock.forward(self, x):",
+    "docstring": "",
+    "timestamp": "2025-05-17 23:26:50"
+}

@@ -1,0 +1,36 @@
+{
+    "file_path": "pytorch-stable-diffusion-main/sd/decoder.py",
+    "functions": [
+        {
+            "function_name": "VAE_AttentionBlock.__init__",
+            "signature": "def VAE_AttentionBlock.__init__(self, channels):",
+            "docstring": ""
+        },
+        {
+            "function_name": "VAE_AttentionBlock.forward",
+            "signature": "def VAE_AttentionBlock.forward(self, x):",
+            "docstring": ""
+        },
+        {
+            "function_name": "VAE_ResidualBlock.__init__",
+            "signature": "def VAE_ResidualBlock.__init__(self, in_channels, out_channels):",
+            "docstring": ""
+        },
+        {
+            "function_name": "VAE_ResidualBlock.forward",
+            "signature": "def VAE_ResidualBlock.forward(self, x):",
+            "docstring": ""
+        },
+        {
+            "function_name": "VAE_Decoder.__init__",
+            "signature": "def VAE_Decoder.__init__(self):",
+            "docstring": ""
+        },
+        {
+            "function_name": "VAE_Decoder.forward",
+            "signature": "def VAE_Decoder.forward(self, x):",
+            "docstring": ""
+        }
+    ],
+    "timestamp": "2025-05-17 23:26:50"
+}
