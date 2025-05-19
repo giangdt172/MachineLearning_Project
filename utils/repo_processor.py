@@ -11,7 +11,8 @@ from .file_utils import build_file_structure
 
 # Define data folder paths
 DATA_FOLDER = "data"
-PROCESSED_REPO_PATH = os.path.join(DATA_FOLDER, "processed_repositories")
+PROCESSED_REPO_PATH = os.path.join(DATA_FOLDER, "raw_json")
+REFINED_REPO_PATH = os.path.join(DATA_FOLDER, "enhanced_json")
 
 def process_uploaded_repository(repo_file):
     """Process an uploaded repository and save its structure"""
@@ -21,10 +22,17 @@ def process_uploaded_repository(repo_file):
     # Create data directories if they don't exist
     os.makedirs(DATA_FOLDER, exist_ok=True)
     os.makedirs(PROCESSED_REPO_PATH, exist_ok=True)
+    os.makedirs(REFINED_REPO_PATH, exist_ok=True)
     
     # Extract the repository to a temporary directory
     temp_dir = tempfile.mkdtemp()
     repo_name = os.path.splitext(os.path.basename(repo_file.name))[0]
+    
+    # Initialize file paths
+    output_file = os.path.join(PROCESSED_REPO_PATH, f"{repo_name}.json")
+    refined_file = os.path.join(REFINED_REPO_PATH, f"{repo_name}.json")
+    processed_data = None
+    enhanced_data = None
     
     try:
         with zipfile.ZipFile(repo_file.name, 'r') as zip_ref:
@@ -35,20 +43,35 @@ def process_uploaded_repository(repo_file):
         
         # Process the repository using process_repo if it's available
         try:
-            from parse_repo import process_repo
+            from data_preprocessing.parse_repo import process_repo
             processed_data = process_repo(temp_dir)
             
             if processed_data is None:
                 return f"Repository {repo_name} does not meet processing criteria.", "", file_structure, temp_dir
             
             # Save the processed data to the data folder
-            output_file = os.path.join(PROCESSED_REPO_PATH, f"{repo_name}.json")
             with open(output_file, "w", encoding="utf-8") as f:
                 json.dump(processed_data, f, ensure_ascii=False, indent=4)
+                
         except (ImportError, ModuleNotFoundError):
             # If process_repo is not available, continue without it
             processed_data = {"info": "parse_repo module not found, basic processing only"}
-        
+            with open(output_file, "w", encoding="utf-8") as f:
+                json.dump(processed_data, f, ensure_ascii=False, indent=4)
+
+        # Try to enhance the data if possible
+        try:
+            from data_preprocessing.enhance_data import refine
+            enhanced_data = refine(output_file)
+            
+            with open(refined_file, "w", encoding="utf-8") as f:
+                json.dump(enhanced_data, f, ensure_ascii=False, indent=4)
+
+        except (ImportError, ModuleNotFoundError):
+            enhanced_data = {"info": "enhance_data module not found, continuing without enhancement"}
+            with open(refined_file, "w", encoding="utf-8") as f:
+                json.dump(enhanced_data, f, ensure_ascii=False, indent=4)
+            
         # Count Python files
         py_files = []
         def count_py_files(node):
@@ -87,6 +110,10 @@ Structure Overview:
 - {func_count} functions found
 - {class_count} classes found
 - {len(import_statements)} unique third-party imports
+
+Data saved in:
+- {output_file}
+- {refined_file}
 """
         return "Processing complete!", summary, file_structure, temp_dir
     
