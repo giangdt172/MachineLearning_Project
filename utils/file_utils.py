@@ -170,7 +170,7 @@ def extract_py_files(file_structure):
     traverse(file_structure)
     return sorted(files)
 
-def save_model_input(file_path, signature, docstring):
+def save_model_input(file_path: str, name: str, signature: str, docstring: str):
     """Save the model input data to a JSON file"""
     if not file_path:
         return f"Error: No file selected"
@@ -179,16 +179,29 @@ def save_model_input(file_path, signature, docstring):
         # Create a directory for saved inputs if it doesn't exist
         os.makedirs("model_inputs", exist_ok=True)
         
-        # Create a filename based on the selected file
+        # Create a filename based on the selected file and function name
         base_filename = os.path.basename(file_path)
-        output_filename = f"model_inputs/{os.path.splitext(base_filename)[0]}_input.json"
+        base_name_part = os.path.splitext(base_filename)[0]
+        
+        function_name_part_for_file = ""
+        if name: # If a name was extracted
+            # Sanitize: replace non-alphanumeric/hyphen with a single underscore
+            s = re.sub(r'[^\\w-]+', '_', name) 
+            # Collapse multiple underscores to one
+            s = re.sub(r'_+', '_', s)
+            # Remove leading/trailing underscores
+            s = s.strip('_')
+            if s: # If something remains after sanitization
+                function_name_part_for_file = f"_{s}"
+        
+        output_filename = f"model_inputs/{base_name_part}{function_name_part_for_file}_input.json"
         
         # Save the data as JSON
         data = {
             "file_path": file_path,
+            "name": name,
             "signature": signature,
-            "docstring": docstring,
-            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
+            "docstring": "DOCSTRING" if docstring == "" else docstring,
         }
         
         with open(output_filename, "w", encoding="utf-8") as f:
