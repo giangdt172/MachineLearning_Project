@@ -241,9 +241,6 @@ def create_application():
                 gr.Markdown("### Model Input")
                 gr.Markdown("*Select a function from the dropdown or enter details manually*")
                 
-                # Add dropdown for functions in the current file
-                function_dropdown = gr.Dropdown(label="Select a function/method", choices=[], elem_id="function-dropdown")
-                
                 signature_input = gr.Textbox(label="Signature", placeholder="Enter function/method signature here...", 
                                            lines=2, interactive=True)
                 docstring_input = gr.Textbox(label="Docstring", placeholder="Enter docstring here...", 
@@ -253,7 +250,6 @@ def create_application():
                 with gr.Row():
                     export_btn = gr.Button("Save Model Input", variant="primary")
                     extract_btn = gr.Button("Analyze File", variant="secondary")
-                    export_all_btn = gr.Button("Export All Functions", variant="secondary")
                     export_status = gr.Textbox(label="Status", visible=False)
         
         # Store file structure and temp_dir
@@ -309,37 +305,66 @@ def create_application():
             outputs=file_content,
             show_progress=False
         ).then(
-            lambda content: analyze_file_functions(content),
+            lambda content: analyze_file_functions(content)[1:],
             inputs=file_content,
-            outputs=[function_dropdown, function_data_state, export_status]
+            outputs=[function_data_state, export_status]
         )
         
         # Connect the analyze button
         extract_btn.click(
-            lambda content: analyze_file_functions(content),
+            lambda content: analyze_file_functions(content)[1:],
             inputs=file_content,
-            outputs=[function_dropdown, function_data_state, export_status]
+            outputs=[function_data_state, export_status]
         )
         
         # Connect the export button
         export_btn.click(
-            lambda p, sig, doc: save_model_input(p, sig, doc),
+            lambda p, sig, doc: save_model_input(p, extract_function_name(sig), sig, doc),
             inputs=[selected_path, signature_input, docstring_input],
             outputs=export_status
         )
         
-        # Connect the export all button
-        export_all_btn.click(
-            lambda p, fd: export_all_functions(p, fd),
-            inputs=[selected_path, function_data_state],
-            outputs=export_status
-        )
-        
-        # Connect the function dropdown
-        function_dropdown.change(
-            lambda fs, fd: set_function_inputs(fs, fd),
-            inputs=[function_dropdown, function_data_state],
-            outputs=[signature_input, docstring_input]
-        )
-        
     return app 
+
+def create_model_input_form():
+    with gr.Blocks() as form:
+        gr.subheader("Model Input")
+        gr.write("Select a function from the dropdown or enter details manually")
+        
+        # Remove the function/method dropdown field
+        # st.selectbox("Select a function/method", options=[], key="function_dropdown")
+        
+        signature = gr.text_area("Signature", placeholder="Enter function/method signature here...", key="signature")
+        docstring = gr.text_area("Docstring", placeholder="Enter docstring here...", key="docstring")
+        
+        col1, col2 = gr.columns(2)
+        with col1:
+            save_button = gr.form_submit_button("Save Model Input")
+        with col2:
+            analyze_button = gr.form_submit_button("Analyze File")
+        # Remove Export All Functions button
+        # with col3:
+        #     export_button = gr.form_submit_button("Export All Functions")
+        
+        if save_button:
+            # Extract function name from signature
+            function_name = extract_function_name(signature)
+            model_input = {
+                "name": function_name,
+                "signature": signature,
+                "docstring": docstring
+            }
+            gr.session_state.model_input = model_input
+            gr.success(f"Saved model input for function: {function_name}")
+
+# Add new function to extract function name
+def extract_function_name(signature):
+    if not signature:
+        return ""
+    signature = signature.strip()
+    if signature.startswith("def "):
+        # Extract name between "def " and first "("
+        name_end = signature.find("(")
+        if name_end > 4:  # "def " is 4 characters
+            return signature[4:name_end].strip()
+    return "" 
