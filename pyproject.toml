@@ -8,4 +8,6 @@ dependencies = [
     "gradio>=5.29.1",
     "networkx>=3.4.2",
     "numpy>=2.2.5",
+    "torch>=2.7.0",
+    "transformers>=4.51.3",
 ]
