@@ -8,7 +8,6 @@ from transformers import PreTrainedModel, AutoModel
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 from transformers.modeling_outputs import SequenceClassifierOutput
 from dotenv import load_dotenv
-import os
 
 load_dotenv()
 hf_token = os.getenv("hf_token")
