@@ -547,8 +547,8 @@ if __name__ == "__main__":
     model_pt_path = r"D:\HUST\2024.2\Machine Learning\ML_project\src\model\checkpoint-792\model_epoch_4.pt"
     model = CodeClassifier(checkpoint_dir, model_pt_path)
     anchor = {"name": "__init__",
-        "signature": " def __init__(self, dim: int, eps: float = 1e-6)",
-        "docstring": "Implement RMSNorm function"}
+        "signature": " def __init__(self, eps: float)",
+        "docstring": "Implement RMSNorm init method"}
     
     # Function to evaluate relevance for a method
     def evaluate_method_relevance(method, anchor, model, depth=0):

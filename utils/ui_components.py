@@ -25,9 +25,11 @@ from .method_extractor import (
     flatten_method_call_tree
 )
 from models.model import CodeClassifier
+from .llm_completion import LLMCompletionHandler
 
-# Initialize CodeClassifier model (paths will be updated when the app runs)
+# Initialize CodeClassifier model and LLM handler
 code_classifier = None
+llm_handler = LLMCompletionHandler()
 
 def initialize_code_classifier(checkpoint_dir, model_pt_path):
     """Initialize the code classifier model."""
@@ -240,6 +242,7 @@ def create_application():
         relevance_info_state = gr.State([])
         call_tree_state = gr.State([])
         
+        # Main application UI
         with gr.Row():
             with gr.Column(scale=1):
                 repo_file = gr.File(label="Upload Repository (ZIP file)")
@@ -250,6 +253,7 @@ def create_application():
                 repo_info = gr.Textbox(label="Repository Information", placeholder="Repository details will appear here...", 
                                       lines=8, interactive=False)
         
+        # File explorer section (initially hidden)
         with gr.Row(visible=False) as file_explorer_row:
             with gr.Column(scale=1):
                 gr.Markdown("### Repository Structure")
@@ -266,46 +270,53 @@ def create_application():
                                           interactive=True, elem_id="selected-path-input")
                 file_content = gr.Code(label="File Content", language="python", lines=20, interactive=False)
                 
-                # Add Signature and Docstring fields
-                gr.Markdown("### Model Input")
+                # Function Input Section
+                gr.Markdown("### Function Input")
                 gr.Markdown("*Enter function signature and docstring below*")
                 
                 signature_input = gr.Textbox(label="Signature", placeholder="Enter function/method signature here...", 
-                                           lines=2, interactive=True)
+                                          lines=2, interactive=True)
                 docstring_input = gr.Textbox(label="Docstring", placeholder="Enter docstring here...", 
-                                           lines=4, interactive=True)
+                                          lines=4, interactive=True)
                 
-                # Add relevance indicator
-                relevance_status = gr.Markdown("", elem_id="relevance-indicator")
-                
-                # Add button to save/export the data
+                # Buttons for analysis and generation
                 with gr.Row():
-                    export_btn = gr.Button("Save Model Input", variant="primary")
-                    extract_btn = gr.Button("Analyze File", variant="secondary")
-                    check_relevance_btn = gr.Button("Check Relevance", variant="secondary")
+                    check_relevance_btn = gr.Button("Check Relevance", variant="primary")
+                    complete_function_btn = gr.Button("Complete Function", variant="primary")
                     export_status = gr.Textbox(label="Status", visible=False)
                 
-                # Add area to display relevant methods
-                relevant_methods_md = gr.Markdown("### Relevant Methods", visible=False)
-                relevant_methods_box = gr.Dataframe(
-                    headers=["Method Name", "Similarity"],
-                    datatype=["str", "str"],
-                    visible=False
-                )
+                # Relevance Status
+                relevance_status = gr.Markdown("", elem_id="relevance-indicator")
                 
-                # Add area for call tree analysis
-                call_tree_md = gr.Markdown("### Call Tree Analysis", visible=False)
-                with gr.Tabs(visible=False) as call_tree_tabs:
-                    with gr.Tab("Call Tree Summary"):
-                        call_tree_summary = gr.Markdown("")
-                    with gr.Tab("Method Relevance"):
-                        call_tree_relevance = gr.Dataframe(
-                            headers=["Method", "Relevance", "Score"],
-                            datatype=["str", "str", "str"]
+                # Results Tabs - All in one tabbed interface
+                with gr.Tabs() as results_tabs:
+                    # Relevant Methods Tab
+                    with gr.Tab("Relevant Methods"):
+                        relevant_methods_md = gr.Markdown("### Relevant Methods")
+                        relevant_methods_box = gr.Dataframe(
+                            headers=["Method Name", "Relevance Score"],
+                            datatype=["str", "str"]
                         )
-                    with gr.Tab("Call Paths"):
-                        call_paths = gr.Markdown("")
-        
+                    
+                    # Code Completion Tab
+                    with gr.Tab("Code Completion"):
+                        code_completion_md = gr.Markdown("### Generated Code")
+                        code_completion_output = gr.Code(label="Generated Code", language="python", lines=15, interactive=False)
+                    
+                    # Call Tree Analysis Tab
+                    with gr.Tab("Call Tree Analysis"):
+                        call_tree_md = gr.Markdown("### Call Tree Analysis")
+                        with gr.Tabs() as call_tree_tabs:
+                            with gr.Tab("Call Tree Summary"):
+                                call_tree_summary = gr.Markdown("")
+                            with gr.Tab("Method Relevance"):
+                                call_tree_relevance = gr.Dataframe(
+                                    headers=["Method", "Relevance", "Score"],
+                                    datatype=["str", "str", "str"]
+                                )
+                            with gr.Tab("Call Paths"):
+                                call_paths = gr.Markdown("")
+
         # Store file structure and temp_dir
         file_structure_state = gr.State(None)
         temp_dir_state = gr.State(None)
@@ -372,27 +383,8 @@ def create_application():
             lambda: gr.update(value=""),
             inputs=[],
             outputs=relevance_status
-        ).then(
-            # Reset relevance methods display
-            lambda: [gr.update(visible=False), gr.update(visible=False, value=[])],
-            inputs=[],
-            outputs=[relevant_methods_md, relevant_methods_box]
         )
-        
-        # Connect the analyze button
-        extract_btn.click(
-            lambda content: analyze_file_functions(content)[1:],
-            inputs=file_content,
-            outputs=[function_data_state, export_status]
-        )
-        
-        # Connect the export button
-        export_btn.click(
-            lambda p, name, sig, doc: save_model_input(p, extract_function_name(sig), sig, doc),
-            inputs=[selected_path, signature_input, signature_input, docstring_input],
-            outputs=export_status
-        )
-        
+       
         # Connect the check relevance button
         check_relevance_btn.click(
             check_function_relevance_to_file,
@@ -407,18 +399,38 @@ def create_application():
             outputs=[
                 relevance_status,
                 relevance_info_state,
-                relevant_methods_md,
                 relevant_methods_box,
-                call_tree_md,
-                call_tree_tabs,
                 call_tree_summary,
                 call_tree_relevance,
-                call_paths,
-                call_tree_state
+                call_paths
             ]
+        ).then(
+            # Switch to the Relevant Methods tab after checking relevance
+            lambda: 0,  # Return tab index 0 (Relevant Methods tab)
+            inputs=None,
+            outputs=results_tabs
         )
         
-    return app
+        # Event handler for function completion
+        complete_function_btn.click(
+            complete_function,
+            inputs=[
+                signature_input,
+                docstring_input,
+                relevance_info_state,
+            ],
+            outputs=[
+                code_completion_output,
+                export_status
+            ]
+        ).then(
+            # Switch to the Code Completion tab after generating code
+            lambda: 1,  # Return tab index 1 (Code Completion tab)
+            inputs=None,
+            outputs=results_tabs
+        )
+        
+        return app
 
 def extract_function_name(signature):
     """Extract function name from signature."""
@@ -463,15 +475,11 @@ def check_function_relevance_to_file(selected_path, signature, docstring, json_p
     if not selected_path or not json_path:
         return (
             gr.update(value="<div style='color: red;'>No file selected or JSON not available</div>"),
-            [],
-            gr.update(visible=False),
-            gr.update(visible=False, value=[]),
-            gr.update(visible=False),
-            gr.update(visible=False),
-            "",
-            [],
-            "",
-            []
+            [],  # relevant_methods will be empty
+            [],  # empty dataframe
+            "",  # empty call tree summary
+            [],  # empty call tree relevance
+            ""   # empty call paths
         )
     
     # Extract the function name from signature
@@ -491,15 +499,11 @@ def check_function_relevance_to_file(selected_path, signature, docstring, json_p
             if not initialize_code_classifier(checkpoint_dir, model_pt_path):
                 return (
                     gr.update(value="<div style='color: red;'>Failed to initialize code classifier model</div>"),
-                    [],
-                    gr.update(visible=False),
-                    gr.update(visible=False, value=[]),
-                    gr.update(visible=False),
-                    gr.update(visible=False),
-                    "",
-                    [],
-                    "",
-                    []
+                    [],  # relevant_methods will be empty
+                    [],  # empty dataframe
+                    "",  # empty call tree summary
+                    [],  # empty call tree relevance
+                    ""   # empty call paths
                 )
         
         # Extract methods from the selected file's JSON entry
@@ -508,15 +512,11 @@ def check_function_relevance_to_file(selected_path, signature, docstring, json_p
         if not methods:
             return (
                 gr.update(value="<div style='color: orange;'>No methods found in the selected file</div>"),
-                [],
-                gr.update(visible=False),
-                gr.update(visible=False, value=[]),
-                gr.update(visible=False),
-                gr.update(visible=False),
-                "",
-                [],
-                "",
-                []
+                [],  # relevant_methods will be empty
+                [],  # empty dataframe
+                "",  # empty call tree summary
+                [],  # empty call tree relevance
+                ""   # empty call paths
             )
         
         # Check relevance of each method
@@ -528,14 +528,15 @@ def check_function_relevance_to_file(selected_path, signature, docstring, json_p
             pred_class, logits = code_classifier.predict_text(input_ref_)
             
             # Convert logits to probabilities if needed
-            if hasattr(logits, 'tolist'):
-                logits = logits.tolist()
+            logits_value = logits[0, 1].item()
             
             # Store method name and relevance score
             method_relevance = {
                 "name": method["name"],
-                "relevance_score": logits[0][1] if isinstance(logits[0], list) else logits[1],
-                "is_relevant": pred_class == 1
+                "relevance_score": logits_value,
+                "is_relevant": pred_class == 1,
+                "code": method.get("code", ""),
+                "description": method.get("description", "")
             }
             relevant_methods.append(method_relevance)
             
@@ -572,7 +573,7 @@ def check_function_relevance_to_file(selected_path, signature, docstring, json_p
         call_tree_relevance_data = []
         call_paths_html = ""
         
-        if relevant_methods:
+        if relevant_methods and relevant_count > 0:
             # Get the most relevant method
             most_relevant = relevant_methods[0]["name"]
             most_relevant_method = next((m for m in methods if m["name"] == most_relevant), None)
@@ -614,23 +615,15 @@ def check_function_relevance_to_file(selected_path, signature, docstring, json_p
                         """Evaluate the relevance of a method against an anchor using the model."""
                         # Check if method has all the required fields
                         if all(field in method for field in ["name", "description", "code"]):
-                            # Create input for the model
-                            method_data = {
-                                "name": method["name"],
-                                "description": method["description"],
-                                "code": method["code"]
-                            }
-                            
-                            # Create input reference
-                            input_ref = f"{anchor['name']}\n{anchor['signature']}\n{anchor['docstring']}\n</s>\n{method_data['name']}\n{method_data['code']}\n{method_data['description']}"
+                            # Create input reference using the same format as the initial relevance check
+                            input_ref = f"{anchor}\n</s>\n{method}"
                             
                             # Predict using the model
                             try:
                                 pred_class, logits = model.predict_text(input_ref)
-                                if hasattr(logits, 'tolist'):
-                                    logits = logits.tolist()
+        
                                 
-                                relevance_score = logits[0][1] if isinstance(logits[0], list) else logits[1]
+                                relevance_score = logits[0, 1].item()
                                 relevance = "Relevant" if pred_class == 1 else "Not relevant"
                                 
                                 return {
@@ -683,17 +676,14 @@ def check_function_relevance_to_file(selected_path, signature, docstring, json_p
                     
                     call_tree_data = call_trees
         
+        # Return the data for the UI components - no visibility updates needed
         return (
             gr.update(value=relevance_html),
             relevant_methods,
-            gr.update(visible=True),
-            gr.update(visible=True, value=display_data),
-            gr.update(visible=len(call_tree_relevance_data) > 0),
-            gr.update(visible=len(call_tree_relevance_data) > 0),
+            display_data,
             call_tree_summary_html if 'call_tree_summary_html' in locals() else "",
             call_tree_relevance_data,
-            call_paths_html,
-            call_tree_data
+            call_paths_html
         )
         
     except Exception as e:
@@ -703,13 +693,41 @@ def check_function_relevance_to_file(selected_path, signature, docstring, json_p
         traceback.print_exc()
         return (
             gr.update(value=f"<div style='color: red;'>{error_message}</div>"),
-            [],
-            gr.update(visible=False),
-            gr.update(visible=False, value=[]),
-            gr.update(visible=False),
-            gr.update(visible=False),
-            "",
-            [],
-            "",
-            []
+            [],  # relevant_methods will be empty
+            [],  # empty dataframe
+            "",  # empty call tree summary
+            [],  # empty call tree relevance
+            ""   # empty call paths
+        )
+
+def complete_function(signature, docstring, relevant_methods):
+    """Use LLM to complete the function based on the signature, docstring and relevant methods."""
+    global llm_handler
+    
+    if not signature:
+        return (
+            "```\n# Error: Function signature is empty\n```", 
+            "Signature required"
+        )
+    
+    try:
+        result = llm_handler.complete_function(signature, docstring, relevant_methods)
+        
+        if result.get("success", False):
+            return (
+                result["code"],
+                "Code generation successful"
+            )
+        else:
+            error_msg = result.get("error", "Unknown error")
+            return (
+                f"```\n# Error: {error_msg}\n```",
+                f"Failed to generate code: {error_msg}"
+            )
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return (
+            f"```\n# Exception occurred: {str(e)}\n```",
+            f"Exception: {str(e)}"
         ) 
