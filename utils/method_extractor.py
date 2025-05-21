@@ -241,7 +241,8 @@ def build_method_call_tree(json_path, target_file_key, depth=2):
                         "name": name_part,
                         "description": func.get("description", ""),
                         "code": func.get("code", ""),
-                        "file_path": file_path
+                        "file_path": file_path,
+                        "outgoing_calls": func.get("outgoing_calls", {})  # Include outgoing calls for further resolution
                     }
                     resolved_methods[method_name] = method_info
                     return method_info
@@ -254,7 +255,8 @@ def build_method_call_tree(json_path, target_file_key, depth=2):
                             "name": name_part,
                             "description": method.get("description", ""),
                             "code": method.get("code", ""),
-                            "file_path": file_path
+                            "file_path": file_path,
+                            "outgoing_calls": method.get("outgoing_calls", {})  # Include outgoing calls for further resolution
                         }
                         resolved_methods[method_name] = method_info
                         return method_info
@@ -294,7 +296,8 @@ def build_method_call_tree(json_path, target_file_key, depth=2):
                             "description": method.get("description", ""),
                             "code": method.get("code", ""),
                             "file_path": file_path,
-                            "method_type": "class_method"
+                            "method_type": "class_method",
+                            "outgoing_calls": method.get("outgoing_calls", {})  # Include outgoing calls for further resolution
                         }
                         class_methods.append(method_info)
                     break
@@ -323,7 +326,8 @@ def build_method_call_tree(json_path, target_file_key, depth=2):
                         "name": name_part,
                         "description": func.get("description", ""),
                         "code": func.get("code", ""),
-                        "file_path": file_path
+                        "file_path": file_path,
+                        "outgoing_calls": func.get("outgoing_calls", {})  # Include outgoing calls for further resolution
                     }
                     resolved_methods[function_name] = function_info
                     return function_info
@@ -338,10 +342,17 @@ def build_method_call_tree(json_path, target_file_key, depth=2):
         resolved_methods[function_name] = basic_info
         return basic_info
     
-    def build_call_tree_for_method(method_data, current_depth=0):
+    def build_call_tree_for_method(method_data, current_depth=0, visited=None):
         """Recursively build the call tree for a method"""
-        if current_depth >= depth:
+        if visited is None:
+            visited = set()
+            
+        # Avoid circular references
+        method_identifier = f"{method_data.get('name', '')}@{method_data.get('file_path', '')}"
+        if method_identifier in visited or current_depth >= depth:
             return method_data
+            
+        visited.add(method_identifier)
         
         # Get outgoing calls
         outgoing_calls = method_data.get("outgoing_calls", {})
@@ -380,7 +391,8 @@ def build_method_call_tree(json_path, target_file_key, depth=2):
                     if current_depth < depth - 1:
                         method = build_call_tree_for_method(
                             method, 
-                            current_depth + 1
+                            current_depth + 1,
+                            visited.copy()
                         )
                     called_methods.append(method)
             else:
@@ -389,7 +401,8 @@ def build_method_call_tree(json_path, target_file_key, depth=2):
                 if current_depth < depth - 1:
                     resolved_method = build_call_tree_for_method(
                         resolved_method, 
-                        current_depth + 1
+                        current_depth + 1,
+                        visited.copy()
                     )
                 called_methods.append(resolved_method)
         
@@ -400,7 +413,8 @@ def build_method_call_tree(json_path, target_file_key, depth=2):
             if current_depth < depth - 1:
                 function_details = build_call_tree_for_method(
                     function_details,
-                    current_depth + 1
+                    current_depth + 1,
+                    visited.copy()
                 )
             called_methods.append(function_details)
         
@@ -459,10 +473,229 @@ def flatten_method_call_tree(call_tree, parent_names=None):
     
     return all_paths
 
+def find_method_across_files(json_path, method_name):
+    """
+    Find a method or function across all files in the JSON data.
+    
+    Args:
+        json_path (str): Path to the enhanced JSON file.
+        method_name (str): Name of the method/function to find (without file path).
+        
+    Returns:
+        list: A list of dictionaries containing the method details from all matching files.
+    """
+    matching_methods = []
+    
+    try:
+        with open(json_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        print(f"Error reading or parsing JSON file {json_path}: {e}")
+        return matching_methods
+    
+    # Search across all files in the JSON
+    for file_path, file_data in data.items():
+        # Search in functions
+        for func in file_data.get("functions", []):
+            func_name = func.get("name", "").split("@")[0] if "@" in func.get("name", "") else func.get("name", "")
+            if func_name == method_name:
+                method_info = {
+                    "name": func_name,
+                    "description": func.get("description", ""),
+                    "code": func.get("code", ""),
+                    "file_path": file_path,
+                    "outgoing_calls": func.get("outgoing_calls", {})
+                }
+                matching_methods.append(method_info)
+        
+        # Search in class methods
+        for cls in file_data.get("classes", []):
+            for method in cls.get("methods", []):
+                method_name_part = method.get("name", "").split("@")[0] if "@" in method.get("name", "") else method.get("name", "")
+                if method_name_part == method_name:
+                    method_info = {
+                        "name": method_name_part,
+                        "description": method.get("description", ""),
+                        "code": method.get("code", ""),
+                        "file_path": file_path,
+                        "outgoing_calls": method.get("outgoing_calls", {})
+                    }
+                    matching_methods.append(method_info)
+    
+    return matching_methods
+
+def get_cross_file_dependencies(json_path, method_data):
+    """
+    Extract all cross-file dependencies for a method or function.
+    
+    Args:
+        json_path (str): Path to the enhanced JSON file.
+        method_data (dict): Dictionary containing the method details.
+        
+    Returns:
+        dict: A dictionary containing lists of cross-file dependencies.
+    """
+    cross_file_deps = {
+        "functions": [],
+        "classes": []
+    }
+    
+    current_file = method_data.get("file_path", "")
+    outgoing_calls = method_data.get("outgoing_calls", {})
+    
+    # Extract cross-file function calls
+    for func in outgoing_calls.get("functions", []):
+        if "@" in func:
+            _, file_path = func.split("@", 1)
+            if file_path != current_file:
+                cross_file_deps["functions"].append(func)
+    
+    # Extract cross-file class references
+    for cls in outgoing_calls.get("classes", []):
+        if "@" in cls:
+            _, file_path = cls.split("@", 1)
+            if file_path != current_file:
+                cross_file_deps["classes"].append(cls)
+    
+    return cross_file_deps
+
+def extract_methods_from_references(json_path, references, ref_type="outgoing_calls"):
+    """
+    Extract method details from function/class references in outgoing calls or noise fields.
+    
+    Args:
+        json_path (str): Path to the enhanced JSON file.
+        references (dict): Dictionary containing 'functions' and 'classes' lists with references.
+        ref_type (str): Type of reference ('outgoing_calls' or 'noise').
+        
+    Returns:
+        list: A list of dictionaries with extracted method details.
+    """
+    extracted_methods = []
+    
+    if not json_path or not references:
+        return extracted_methods
+    
+    try:
+        with open(json_path, "r", encoding="utf-8") as f:
+            all_data = json.load(f)
+    except Exception as e:
+        print(f"Error reading JSON file: {e}")
+        return extracted_methods
+
+    # Process function references
+    for func_ref in references.get("functions", []):
+        if "@" in func_ref:
+            func_name, file_path = func_ref.split("@", 1)
+            # Find the function in the data
+            if file_path and file_path in all_data:
+                file_data = all_data[file_path]
+                for func in file_data.get("functions", []):
+                    if func.get("name") == func_ref:
+                        method_info = {
+                            "name": func_name,
+                            "description": func.get("description", ""),
+                            "code": func.get("code", ""),
+                            "file_path": file_path,
+                            "ref_type": f"{ref_type}_function"
+                        }
+                        extracted_methods.append(method_info)
+                        break
+    
+    # Process class references
+    for class_ref in references.get("classes", []):
+        if "@" in class_ref:
+            class_name, file_path = class_ref.split("@", 1)
+            # Find class methods in the data
+            if file_path and file_path in all_data:
+                file_data = all_data[file_path]
+                for cls in file_data.get("classes", []):
+                    if cls.get("name") == class_ref:
+                        # Add all methods of this class
+                        for method in cls.get("methods", []):
+                            method_name = method.get("name", "").split("@")[0] if "@" in method.get("name", "") else method.get("name", "")
+                            method_info = {
+                                "name": method_name,
+                                "description": method.get("description", ""),
+                                "code": method.get("code", ""),
+                                "file_path": file_path,
+                                "class_name": class_name,
+                                "ref_type": f"{ref_type}_class_method"
+                            }
+                            extracted_methods.append(method_info)
+                        break
+    
+    return extracted_methods
+
+def extract_all_related_methods(json_path, file_path):
+    """
+    Extract all methods related to a file including methods from outgoing calls and noise.
+    
+    Args:
+        json_path (str): Path to the enhanced JSON file.
+        file_path (str): Path to the source file.
+        
+    Returns:
+        dict: A dictionary with keys 'file_methods', 'outgoing_calls', and 'noise',
+              each containing a list of method dictionaries.
+    """
+    all_methods = {
+        'file_methods': [],
+        'outgoing_calls_methods': [],
+        'noise_methods': []
+    }
+    
+    try:
+        # Get methods from the file itself
+        file_methods = extract_methods_for_specific_file_from_enhanced_json(json_path, file_path)
+        all_methods['file_methods'] = file_methods
+        
+        # Load the JSON file to access raw data
+        with open(json_path, "r", encoding="utf-8") as f:
+            all_data = json.load(f)
+            
+        # Get file data
+        file_data = all_data.get(file_path, {})
+        
+        # Process each method to extract outgoing calls and noise
+        for method in file_methods:
+            # Extract methods from outgoing calls
+            if 'outgoing_calls' in method:
+                outgoing_methods = extract_methods_from_references(
+                    json_path, method['outgoing_calls'], "outgoing_calls"
+                )
+                all_methods['outgoing_calls_methods'].extend(outgoing_methods)
+        
+        # Process functions in the file
+        for func in file_data.get("functions", []):
+            # Extract noise references
+            if "noise" in func:
+                noise_methods = extract_methods_from_references(
+                    json_path, func["noise"], "noise"
+                )
+                all_methods['noise_methods'].extend(noise_methods)
+        
+        # Process classes in the file
+        for cls in file_data.get("classes", []):
+            for method in cls.get("methods", []):
+                # Extract noise references from class methods
+                if "noise" in method:
+                    noise_methods = extract_methods_from_references(
+                        json_path, method["noise"], "noise"
+                    )
+                    all_methods['noise_methods'].extend(noise_methods)
+    
+    except Exception as e:
+        print(f"Error extracting related methods: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    return all_methods
+
 if __name__ == "__main__":
     # Example usage
-    json_path = "data/enhanced_json/pytorch-llama-main.json"
-    target_file = "pytorch-llama-main/model.py"
+    json_path = "data/enhanced_json/pydep-main.json"
+    target_file = "pydep-main/src/pydepcall/Node.py"
     
     print("Testing basic method extraction...")
     methods = extract_methods_for_specific_file_from_enhanced_json(json_path, target_file)
