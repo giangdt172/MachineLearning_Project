@@ -293,7 +293,8 @@ def build_method_call_tree(json_path, target_file_key, depth=2):
                             "name": method.get("name", "").split("@")[0] if "@" in method.get("name", "") else method.get("name", ""),
                             "description": method.get("description", ""),
                             "code": method.get("code", ""),
-                            "file_path": file_path
+                            "file_path": file_path,
+                            "method_type": "class_method"
                         }
                         class_methods.append(method_info)
                     break
@@ -355,10 +356,25 @@ def build_method_call_tree(json_path, target_file_key, depth=2):
                 if "." in method_name:
                     class_name, _ = method_name.split(".", 1)
                     class_name = f"{class_name}@{file_path}"
+                else:
+                    # If there's no dot, it might be the class name already
+                    class_name = f"{method_name}@{file_path}"
             
             if class_name:
                 # Get all methods of this class
                 class_methods = resolve_class_methods(class_name)
+                
+                # Add a class reference first
+                class_info = {
+                    "name": class_name.split("@")[0] if "@" in class_name else class_name,
+                    "description": "Class from " + (file_path if file_path else "unknown location"),
+                    "code": "",
+                    "file_path": file_path or "unknown",
+                    "method_type": "class"
+                }
+                called_methods.append(class_info)
+                
+                # Then add all methods of this class
                 for method in class_methods:
                     # Recursively build call tree for each method
                     if current_depth < depth - 1:
@@ -450,7 +466,6 @@ if __name__ == "__main__":
     
     print("Testing basic method extraction...")
     methods = extract_methods_for_specific_file_from_enhanced_json(json_path, target_file)
-    #print(methods)
     print(f"Found {len(methods)} methods/functions in {target_file}")
     
     print("\nTesting method call tree construction...")
@@ -481,9 +496,14 @@ if __name__ == "__main__":
                 for file_path, methods_list in methods_by_file.items():
                     print(f"\n  From {file_path} ({len(methods_list)} methods):")
                     for i, called in enumerate(methods_list, 1):
-                        print(f"    {i}. {called['name']}")
-                        print(f"       Description: {called['description'][:50]}..." if called['description'] and len(called['description']) > 50 else f"       Description: {called['description']}" if called['description'] else "       No description")
-                        print(f"       Code snippet: {called['code'][:50]}..." if called['code'] and len(called['code']) > 50 else f"       Code: {called['code']}" if called['code'] else "       No code")
+                        method_type = called.get('method_type', '')
+                        if method_type == 'class':
+                            print(f"    {i}. {called['name']} (Class)")
+                            print(f"       {called['description']}")
+                        else:
+                            print(f"    {i}. {called['name']}")
+                            print(f"       Description: {called['description'][:50]}..." if called['description'] and len(called['description']) > 50 else f"       Description: {called['description']}" if called['description'] else "       No description")
+                            print(f"       Code snippet: {called['code'][:50]}..." if called['code'] and len(called['code']) > 50 else f"       Code: {called['code']}" if called['code'] else "       No code")
                         
                         # Show nested calls if any
                         if "called_methods" in called and called['called_methods']:
@@ -498,46 +518,108 @@ if __name__ == "__main__":
             else:
                 print("\nThis method doesn't call any other methods.")
             
-        # Show one complete detailed example at the end if any methods have calls
-        has_calls = any("called_methods" in tree and tree['called_methods'] for tree in call_trees)
-        if has_calls:
-            for tree in call_trees:
-                if "called_methods" in tree and tree['called_methods']:
-                    detailed_example = tree['called_methods'][0]
-                    print(f"\n=================================================================")
-                    print(f"DETAILED EXAMPLE OF ONE CALLED METHOD:")
-                    print(f"=================================================================")
-                    print(f"  Name: {detailed_example['name']}")
-                    print(f"  From: {detailed_example.get('file_path', 'unknown')}")
-                    print(f"  Description: {detailed_example['description']}")
-                    print(f"  Full code:\n{detailed_example['code']}")
-                    break
-
-    # Test with CodeClassifier
-    # print("\nTesting relevance with CodeClassifier...")
-    # checkpoint_dir = r"D:\HUST\2024.2\Machine Learning\ML_project\src\model\checkpoint-792"
-    # model_pt_path = r"D:\HUST\2024.2\Machine Learning\ML_project\src\model\checkpoint-792\model_epoch_4.pt"
-
-    # try:
-    #     model = CodeClassifier(checkpoint_dir, model_pt_path)
-    #     anchor = {"name": "__init__",
-    #         "signature": " def __init__(self, dim: int, eps: float = 1e-6)",
-    #         "docstring": "Implement RMSNorm function"}
+        # Show complete detailed examples for class methods
+        print(f"\n=================================================================")
+        print(f"DETAILED CLASS METHOD EXAMPLES:")
+        print(f"=================================================================")
         
-    #     print(f"Checking relevance for {len(methods)} methods...")
-    #     relevant = 0
-    #     for method in methods:
-    #         input_ref_ = f"{anchor}\n</s>\n{method}"
-    #         pred_class, logits = model.predict_text(input_ref_)
-    #         print(f"{method['name']}: {'Relevant' if pred_class == 1 else 'Not relevant'} (Score: {logits})")
-    #         if pred_class == 1:
-    #             relevant += 1
-
-    #     if relevant < len(methods) * 0.5:
-    #         print("Not enough relevant methods")
-    #     else:
-    #         print("Enough relevant methods")
-    # except Exception as e:
-    #     print(f"Error running model: {e}")
+        shown_methods = set()
+        for tree in call_trees:
+            if "called_methods" in tree and tree['called_methods']:
+                for called in tree['called_methods']:
+                    if called.get('method_type') == 'class':
+                        class_name = called['name']
+                        # Find methods belonging to this class
+                        for method in tree['called_methods']:
+                            method_name = method.get('name', '')
+                            # Check if it's a method of this class and hasn't been shown yet
+                            if method.get('method_type') == 'class_method' and method_name.startswith(class_name) and method_name not in shown_methods:
+                                print(f"\n--- {method_name} ---")
+                                print(f"Description: {method['description']}")
+                                print(f"Full code:\n{method['code']}")
+                                shown_methods.add(method_name)
+    
+    #print(call_trees)
+    
+    
+    print("\nTesting relevance with CodeClassifier...")
+    checkpoint_dir = r"D:\HUST\2024.2\Machine Learning\ML_project\src\model\checkpoint-792"
+    model_pt_path = r"D:\HUST\2024.2\Machine Learning\ML_project\src\model\checkpoint-792\model_epoch_4.pt"
+    model = CodeClassifier(checkpoint_dir, model_pt_path)
+    anchor = {"name": "__init__",
+        "signature": " def __init__(self, dim: int, eps: float = 1e-6)",
+        "docstring": "Implement RMSNorm function"}
+    
+    # Function to evaluate relevance for a method
+    def evaluate_method_relevance(method, anchor, model, depth=0):
+        """Evaluate the relevance of a method against an anchor using the model."""
+        indent = "  " * depth
+        
+        # Check if method has all the required fields
+        if all(field in method for field in ["name", "description", "code"]):
+            # Create input for the model
+            method_data = {
+                "name": method["name"],
+                "description": method["description"],
+                "code": method["code"]
+            }
+            
+            # Create input reference
+            input_ref = f"{anchor['name']}\n{anchor['signature']}\n{anchor['docstring']}\n</s>\n{method_data['name']}\n{method_data['code']}\n{method_data['description']}"
+            
+            # Predict using the model
+            try:
+                pred_class, logits = model.predict_text(input_ref)
+                relevance = "Relevant" if pred_class == 1 else "Not relevant"
+                print(f"{indent}{method['name']}: {relevance} (Score: {logits})")
+                return pred_class == 1
+            except Exception as e:
+                print(f"{indent}Error evaluating {method['name']}: {e}")
+                return False
+        return False
+    
+    # Function to process a call tree recursively
+    def process_call_tree(tree, anchor, model, depth=0):
+        """Process a call tree and its called methods recursively."""
+        indent = "  " * depth
+        
+        # Evaluate the tree itself
+        print(f"\n{indent}Evaluating call tree: {tree['name']}")
+        is_relevant = evaluate_method_relevance(tree, anchor, model, depth)
+        
+        # Process called methods if they exist
+        if "called_methods" in tree and tree["called_methods"]:
+            print(f"{indent}Processing {len(tree['called_methods'])} called methods for {tree['name']}:")
+            
+            # Track relevance statistics
+            relevant_methods = 0
+            total_methods = 0
+            
+            # Process each called method
+            for called_method in tree["called_methods"]:
+                # Increment count only for methods with required fields
+                if all(field in called_method for field in ["name", "description", "code"]):
+                    total_methods += 1
+                    if evaluate_method_relevance(called_method, anchor, model, depth + 1):
+                        relevant_methods += 1
+                
+                # Recursively process nested call trees
+                if "called_methods" in called_method and called_method["called_methods"]:
+                    process_call_tree(called_method, anchor, model, depth + 1)
+            
+            # Print relevance summary for this level
+            if total_methods > 0:
+                relevance_percentage = (relevant_methods / total_methods) * 100
+                print(f"{indent}Summary for {tree['name']}: {relevant_methods}/{total_methods} methods relevant ({relevance_percentage:.1f}%)")
+    
+    # Process each call tree
+    print("\nEvaluating relevance across all call trees...")
+    for tree_index, tree in enumerate(call_trees, 1):
+        print(f"\n{'='*50}")
+        print(f"CALL TREE #{tree_index}: {tree['name']} - RELEVANCE ANALYSIS")
+        print(f"{'='*50}")
+        process_call_tree(tree, anchor, model)
+    
+    
 
 

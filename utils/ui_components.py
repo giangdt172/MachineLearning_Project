@@ -19,7 +19,11 @@ from .code_analyzer import (
     analyze_file_functions,
     extract_signatures_and_docstrings
 )
-from .method_extractor import extract_methods_for_specific_file_from_enhanced_json
+from .method_extractor import (
+    extract_methods_for_specific_file_from_enhanced_json,
+    build_method_call_tree,
+    flatten_method_call_tree
+)
 from models.model import CodeClassifier
 
 # Initialize CodeClassifier model (paths will be updated when the app runs)
@@ -234,6 +238,7 @@ def create_application():
         model_pt_path_state = gr.State("")
         json_path_state = gr.State("")
         relevance_info_state = gr.State([])
+        call_tree_state = gr.State([])
         
         with gr.Row():
             with gr.Column(scale=1):
@@ -287,6 +292,19 @@ def create_application():
                     datatype=["str", "str"],
                     visible=False
                 )
+                
+                # Add area for call tree analysis
+                call_tree_md = gr.Markdown("### Call Tree Analysis", visible=False)
+                with gr.Tabs(visible=False) as call_tree_tabs:
+                    with gr.Tab("Call Tree Summary"):
+                        call_tree_summary = gr.Markdown("")
+                    with gr.Tab("Method Relevance"):
+                        call_tree_relevance = gr.Dataframe(
+                            headers=["Method", "Relevance", "Score"],
+                            datatype=["str", "str", "str"]
+                        )
+                    with gr.Tab("Call Paths"):
+                        call_paths = gr.Markdown("")
         
         # Store file structure and temp_dir
         file_structure_state = gr.State(None)
@@ -390,7 +408,13 @@ def create_application():
                 relevance_status,
                 relevance_info_state,
                 relevant_methods_md,
-                relevant_methods_box
+                relevant_methods_box,
+                call_tree_md,
+                call_tree_tabs,
+                call_tree_summary,
+                call_tree_relevance,
+                call_paths,
+                call_tree_state
             ]
         )
         
@@ -435,13 +459,19 @@ def update_json_path_and_model_paths(repo_file, temp_dir):
     return json_path, checkpoint_dir, model_pt_path
 
 def check_function_relevance_to_file(selected_path, signature, docstring, json_path, checkpoint_dir, model_pt_path):
-    """Check if the given function is relevant to the selected file."""
+    """Check if the given function is relevant to the selected file and analyze call trees."""
     if not selected_path or not json_path:
         return (
             gr.update(value="<div style='color: red;'>No file selected or JSON not available</div>"),
             [],
             gr.update(visible=False),
-            gr.update(visible=False, value=[])
+            gr.update(visible=False, value=[]),
+            gr.update(visible=False),
+            gr.update(visible=False),
+            "",
+            [],
+            "",
+            []
         )
     
     # Extract the function name from signature
@@ -463,7 +493,13 @@ def check_function_relevance_to_file(selected_path, signature, docstring, json_p
                     gr.update(value="<div style='color: red;'>Failed to initialize code classifier model</div>"),
                     [],
                     gr.update(visible=False),
-                    gr.update(visible=False, value=[])
+                    gr.update(visible=False, value=[]),
+                    gr.update(visible=False),
+                    gr.update(visible=False),
+                    "",
+                    [],
+                    "",
+                    []
                 )
         
         # Extract methods from the selected file's JSON entry
@@ -474,7 +510,13 @@ def check_function_relevance_to_file(selected_path, signature, docstring, json_p
                 gr.update(value="<div style='color: orange;'>No methods found in the selected file</div>"),
                 [],
                 gr.update(visible=False),
-                gr.update(visible=False, value=[])
+                gr.update(visible=False, value=[]),
+                gr.update(visible=False),
+                gr.update(visible=False),
+                "",
+                [],
+                "",
+                []
             )
         
         # Check relevance of each method
@@ -525,19 +567,149 @@ def check_function_relevance_to_file(selected_path, signature, docstring, json_p
         
         relevance_html = f"<div style='color: {color}; font-weight: bold;'>{message}</div>"
         
+        # Build call tree for the most relevant method
+        call_tree_data = []
+        call_tree_relevance_data = []
+        call_paths_html = ""
+        
+        if relevant_methods:
+            # Get the most relevant method
+            most_relevant = relevant_methods[0]["name"]
+            most_relevant_method = next((m for m in methods if m["name"] == most_relevant), None)
+            
+            if most_relevant_method:
+                # Build call tree with depth 2
+                call_trees = build_method_call_tree(json_path, selected_path, depth=2)
+                
+                if call_trees:
+                    # Find the call tree for the most relevant method
+                    target_tree = next((tree for tree in call_trees if tree["name"] == most_relevant), call_trees[0])
+                    
+                    # Generate summary
+                    call_tree_summary_html = f"<h4>Call Tree for {target_tree['name']}</h4>"
+                    if "called_methods" in target_tree and target_tree["called_methods"]:
+                        # Group by file path
+                        methods_by_file = {}
+                        for called in target_tree["called_methods"]:
+                            file_path = called.get("file_path", "unknown")
+                            if file_path not in methods_by_file:
+                                methods_by_file[file_path] = []
+                            methods_by_file[file_path].append(called)
+                        
+                        # Build summary HTML
+                        for file_path, methods_list in methods_by_file.items():
+                            call_tree_summary_html += f"<p><strong>From {file_path} ({len(methods_list)} methods):</strong></p><ul>"
+                            for method in methods_list:
+                                method_type = method.get("method_type", "")
+                                if method_type == "class":
+                                    call_tree_summary_html += f"<li>{method['name']} (Class)</li>"
+                                else:
+                                    call_tree_summary_html += f"<li>{method['name']}</li>"
+                            call_tree_summary_html += "</ul>"
+                    else:
+                        call_tree_summary_html += "<p>No method calls found.</p>"
+                    
+                    # Evaluate relevance for each method in the call tree
+                    def evaluate_method_relevance(method, anchor, model):
+                        """Evaluate the relevance of a method against an anchor using the model."""
+                        # Check if method has all the required fields
+                        if all(field in method for field in ["name", "description", "code"]):
+                            # Create input for the model
+                            method_data = {
+                                "name": method["name"],
+                                "description": method["description"],
+                                "code": method["code"]
+                            }
+                            
+                            # Create input reference
+                            input_ref = f"{anchor['name']}\n{anchor['signature']}\n{anchor['docstring']}\n</s>\n{method_data['name']}\n{method_data['code']}\n{method_data['description']}"
+                            
+                            # Predict using the model
+                            try:
+                                pred_class, logits = model.predict_text(input_ref)
+                                if hasattr(logits, 'tolist'):
+                                    logits = logits.tolist()
+                                
+                                relevance_score = logits[0][1] if isinstance(logits[0], list) else logits[1]
+                                relevance = "Relevant" if pred_class == 1 else "Not relevant"
+                                
+                                return {
+                                    "method": method["name"],
+                                    "relevance": relevance,
+                                    "score": relevance_score
+                                }
+                            except Exception as e:
+                                return {
+                                    "method": method["name"],
+                                    "relevance": "Error",
+                                    "score": str(e)
+                                }
+                        return None
+                    
+                    # Process all methods in the call tree
+                    methods_to_process = [target_tree]
+                    all_relevance_results = []
+                    
+                    if "called_methods" in target_tree:
+                        methods_to_process.extend(target_tree["called_methods"])
+                    
+                    for method in methods_to_process:
+                        result = evaluate_method_relevance(method, anchor, code_classifier)
+                        if result:
+                            all_relevance_results.append(result)
+                    
+                    # Sort by score in descending order
+                    all_relevance_results.sort(key=lambda x: x["score"] if isinstance(x["score"], (int, float)) else 0, reverse=True)
+                    
+                    # Prepare for display
+                    for result in all_relevance_results:
+                        call_tree_relevance_data.append([
+                            result["method"],
+                            result["relevance"],
+                            f"{result['score']:.4f}" if isinstance(result["score"], (int, float)) else str(result["score"])
+                        ])
+                    
+                    # Generate call paths visualization
+                    flat_paths = flatten_method_call_tree(target_tree)
+                    call_paths_html = f"<h4>Call Paths for {target_tree['name']}</h4>"
+                    if flat_paths:
+                        call_paths_html += "<ul>"
+                        for i, path in enumerate(flat_paths, 1):
+                            path_str = " → ".join(m["name"] for m in path)
+                            call_paths_html += f"<li>Path {i}: {path_str}</li>"
+                        call_paths_html += "</ul>"
+                    else:
+                        call_paths_html += "<p>No call paths found.</p>"
+                    
+                    call_tree_data = call_trees
+        
         return (
             gr.update(value=relevance_html),
             relevant_methods,
             gr.update(visible=True),
-            gr.update(visible=True, value=display_data)
+            gr.update(visible=True, value=display_data),
+            gr.update(visible=len(call_tree_relevance_data) > 0),
+            gr.update(visible=len(call_tree_relevance_data) > 0),
+            call_tree_summary_html if 'call_tree_summary_html' in locals() else "",
+            call_tree_relevance_data,
+            call_paths_html,
+            call_tree_data
         )
         
     except Exception as e:
         error_message = f"Error checking relevance: {str(e)}"
         print(error_message)
+        import traceback
+        traceback.print_exc()
         return (
             gr.update(value=f"<div style='color: red;'>{error_message}</div>"),
             [],
             gr.update(visible=False),
-            gr.update(visible=False, value=[])
+            gr.update(visible=False, value=[]),
+            gr.update(visible=False),
+            gr.update(visible=False),
+            "",
+            [],
+            "",
+            []
         ) 
