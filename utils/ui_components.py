@@ -3,19 +3,37 @@ UI components for the repository analysis app.
 """
 
 import gradio as gr
+import os
+import json
+from pathlib import Path
+import re
+
 from .repo_processor import process_uploaded_repository
 from .file_utils import (
     cleanup_temp_dir, 
     display_file_content, 
     extract_py_files,
-    save_model_input,
-    export_all_functions
+    save_model_input
 )
 from .code_analyzer import (
     analyze_file_functions,
-    extract_signatures_and_docstrings,
-    set_function_inputs
+    extract_signatures_and_docstrings
 )
+from .method_extractor import extract_methods_for_specific_file_from_enhanced_json
+from models.model import CodeClassifier
+
+# Initialize CodeClassifier model (paths will be updated when the app runs)
+code_classifier = None
+
+def initialize_code_classifier(checkpoint_dir, model_pt_path):
+    """Initialize the code classifier model."""
+    global code_classifier
+    try:
+        code_classifier = CodeClassifier(checkpoint_dir, model_pt_path)
+        return True
+    except Exception as e:
+        print(f"Error initializing CodeClassifier: {e}")
+        return False
 
 def render_file_tree(file_structure, selected_path=""):
     """Convert file structure to Gradio components"""
@@ -211,6 +229,12 @@ def create_application():
         gr.Markdown("# Python Repository Processor")
         gr.Markdown("Upload a Python repository ZIP file to analyze and extract its structure.")
         
+        # Store paths for CodeClassifier
+        checkpoint_dir_state = gr.State("")
+        model_pt_path_state = gr.State("")
+        json_path_state = gr.State("")
+        relevance_info_state = gr.State([])
+        
         with gr.Row():
             with gr.Column(scale=1):
                 repo_file = gr.File(label="Upload Repository (ZIP file)")
@@ -239,18 +263,30 @@ def create_application():
                 
                 # Add Signature and Docstring fields
                 gr.Markdown("### Model Input")
-                gr.Markdown("*Select a function from the dropdown or enter details manually*")
+                gr.Markdown("*Enter function signature and docstring below*")
                 
                 signature_input = gr.Textbox(label="Signature", placeholder="Enter function/method signature here...", 
                                            lines=2, interactive=True)
                 docstring_input = gr.Textbox(label="Docstring", placeholder="Enter docstring here...", 
                                            lines=4, interactive=True)
                 
+                # Add relevance indicator
+                relevance_status = gr.Markdown("", elem_id="relevance-indicator")
+                
                 # Add button to save/export the data
                 with gr.Row():
                     export_btn = gr.Button("Save Model Input", variant="primary")
                     extract_btn = gr.Button("Analyze File", variant="secondary")
+                    check_relevance_btn = gr.Button("Check Relevance", variant="secondary")
                     export_status = gr.Textbox(label="Status", visible=False)
+                
+                # Add area to display relevant methods
+                relevant_methods_md = gr.Markdown("### Relevant Methods", visible=False)
+                relevant_methods_box = gr.Dataframe(
+                    headers=["Method Name", "Similarity"],
+                    datatype=["str", "str"],
+                    visible=False
+                )
         
         # Store file structure and temp_dir
         file_structure_state = gr.State(None)
@@ -288,6 +324,11 @@ def create_application():
             inputs=python_files_state,
             outputs=file_dropdown,
             show_progress=False
+        ).then(
+            lambda repo_file, temp_dir: update_json_path_and_model_paths(repo_file, temp_dir),
+            inputs=[repo_file, temp_dir_state],
+            outputs=[json_path_state, checkpoint_dir_state, model_pt_path_state],
+            show_progress=False
         )
         
         # Connect the dropdown to select files
@@ -308,6 +349,16 @@ def create_application():
             lambda content: analyze_file_functions(content)[1:],
             inputs=file_content,
             outputs=[function_data_state, export_status]
+        ).then(
+            # Clear relevance indicator when a new file is selected
+            lambda: gr.update(value=""),
+            inputs=[],
+            outputs=relevance_status
+        ).then(
+            # Reset relevance methods display
+            lambda: [gr.update(visible=False), gr.update(visible=False, value=[])],
+            inputs=[],
+            outputs=[relevant_methods_md, relevant_methods_box]
         )
         
         # Connect the analyze button
@@ -319,46 +370,34 @@ def create_application():
         
         # Connect the export button
         export_btn.click(
-            lambda p, sig, doc: save_model_input(p, extract_function_name(sig), sig, doc),
-            inputs=[selected_path, signature_input, docstring_input],
+            lambda p, name, sig, doc: save_model_input(p, extract_function_name(sig), sig, doc),
+            inputs=[selected_path, signature_input, signature_input, docstring_input],
             outputs=export_status
         )
         
-    return app 
+        # Connect the check relevance button
+        check_relevance_btn.click(
+            check_function_relevance_to_file,
+            inputs=[
+                selected_path,
+                signature_input,
+                docstring_input,
+                json_path_state,
+                checkpoint_dir_state,
+                model_pt_path_state
+            ],
+            outputs=[
+                relevance_status,
+                relevance_info_state,
+                relevant_methods_md,
+                relevant_methods_box
+            ]
+        )
+        
+    return app
 
-def create_model_input_form():
-    with gr.Blocks() as form:
-        gr.subheader("Model Input")
-        gr.write("Select a function from the dropdown or enter details manually")
-        
-        # Remove the function/method dropdown field
-        # st.selectbox("Select a function/method", options=[], key="function_dropdown")
-        
-        signature = gr.text_area("Signature", placeholder="Enter function/method signature here...", key="signature")
-        docstring = gr.text_area("Docstring", placeholder="Enter docstring here...", key="docstring")
-        
-        col1, col2 = gr.columns(2)
-        with col1:
-            save_button = gr.form_submit_button("Save Model Input")
-        with col2:
-            analyze_button = gr.form_submit_button("Analyze File")
-        # Remove Export All Functions button
-        # with col3:
-        #     export_button = gr.form_submit_button("Export All Functions")
-        
-        if save_button:
-            # Extract function name from signature
-            function_name = extract_function_name(signature)
-            model_input = {
-                "name": function_name,
-                "signature": signature,
-                "docstring": docstring
-            }
-            gr.session_state.model_input = model_input
-            gr.success(f"Saved model input for function: {function_name}")
-
-# Add new function to extract function name
 def extract_function_name(signature):
+    """Extract function name from signature."""
     if not signature:
         return ""
     signature = signature.strip()
@@ -367,4 +406,138 @@ def extract_function_name(signature):
         name_end = signature.find("(")
         if name_end > 4:  # "def " is 4 characters
             return signature[4:name_end].strip()
-    return "" 
+    return ""
+
+def update_json_path_and_model_paths(repo_file, temp_dir):
+    """Update the JSON path based on the repo file and setup model paths."""
+    json_path = ""
+    try:
+        if repo_file and temp_dir:
+            # Get the base name of the repository ZIP file
+            repo_filename = os.path.basename(repo_file.name)
+            repo_name = os.path.splitext(repo_filename)[0]
+            
+            # Construct the path to the enhanced JSON file
+            json_path = os.path.join("data", "enhanced_json", f"{repo_name}.json")
+            
+            # Check if the JSON file exists
+            if not os.path.exists(json_path):
+                print(f"Warning: Enhanced JSON file not found at {json_path}")
+            else:
+                print(f"Found JSON file at {json_path}")
+    except Exception as e:
+        print(f"Error determining JSON path: {e}")
+    
+    # Set up model paths - these would be configured based on your environment
+    checkpoint_dir = r"D:\HUST\2024.2\Machine Learning\ML_project\src\model\checkpoint-792"
+    model_pt_path = r"D:\HUST\2024.2\Machine Learning\ML_project\src\model\checkpoint-792\model_epoch_4.pt"
+    
+    return json_path, checkpoint_dir, model_pt_path
+
+def check_function_relevance_to_file(selected_path, signature, docstring, json_path, checkpoint_dir, model_pt_path):
+    """Check if the given function is relevant to the selected file."""
+    if not selected_path or not json_path:
+        return (
+            gr.update(value="<div style='color: red;'>No file selected or JSON not available</div>"),
+            [],
+            gr.update(visible=False),
+            gr.update(visible=False, value=[])
+        )
+    
+    # Extract the function name from signature
+    func_name = extract_function_name(signature)
+    
+    # Create the anchor with the entered function details
+    anchor = {
+        "name": func_name,
+        "signature": signature,
+        "docstring": docstring if docstring else "DOCSTRING"
+    }
+    
+    try:
+        # Initialize the model if not already done
+        global code_classifier
+        if code_classifier is None:
+            if not initialize_code_classifier(checkpoint_dir, model_pt_path):
+                return (
+                    gr.update(value="<div style='color: red;'>Failed to initialize code classifier model</div>"),
+                    [],
+                    gr.update(visible=False),
+                    gr.update(visible=False, value=[])
+                )
+        
+        # Extract methods from the selected file's JSON entry
+        methods = extract_methods_for_specific_file_from_enhanced_json(json_path, selected_path)
+        
+        if not methods:
+            return (
+                gr.update(value="<div style='color: orange;'>No methods found in the selected file</div>"),
+                [],
+                gr.update(visible=False),
+                gr.update(visible=False, value=[])
+            )
+        
+        # Check relevance of each method
+        relevant_methods = []
+        relevant_count = 0
+        
+        for method in methods:
+            input_ref_ = f"{anchor}\n</s>\n{method}"
+            pred_class, logits = code_classifier.predict_text(input_ref_)
+            
+            # Convert logits to probabilities if needed
+            if hasattr(logits, 'tolist'):
+                logits = logits.tolist()
+            
+            # Store method name and relevance score
+            method_relevance = {
+                "name": method["name"],
+                "relevance_score": logits[0][1] if isinstance(logits[0], list) else logits[1],
+                "is_relevant": pred_class == 1
+            }
+            relevant_methods.append(method_relevance)
+            
+            if pred_class == 1:
+                relevant_count += 1
+        
+        # Sort methods by relevance score in descending order
+        relevant_methods.sort(key=lambda x: x["relevance_score"], reverse=True)
+        
+        # Prepare data for display
+        display_data = []
+        for method in relevant_methods[:10]:  # Show top 10 methods
+            display_data.append([
+                method["name"],
+                f"{method['relevance_score']:.4f}" if isinstance(method['relevance_score'], (int, float)) else str(method['relevance_score'])
+            ])
+        
+        # Determine if there are enough relevant methods
+        relevance_threshold = 0.3  # 30% of methods should be relevant
+        has_enough_relevant = relevant_count >= len(methods) * relevance_threshold
+        
+        # Create the relevance message
+        if has_enough_relevant:
+            color = "green"
+            message = f"✅ Relevant! Found {relevant_count} out of {len(methods)} relevant methods"
+        else:
+            color = "red"
+            message = f"❌ Not relevant! Only found {relevant_count} out of {len(methods)} relevant methods"
+        
+        relevance_html = f"<div style='color: {color}; font-weight: bold;'>{message}</div>"
+        
+        return (
+            gr.update(value=relevance_html),
+            relevant_methods,
+            gr.update(visible=True),
+            gr.update(visible=True, value=display_data)
+        )
+        
+    except Exception as e:
+        error_message = f"Error checking relevance: {str(e)}"
+        print(error_message)
+        return (
+            gr.update(value=f"<div style='color: red;'>{error_message}</div>"),
+            [],
+            gr.update(visible=False),
+            gr.update(visible=False, value=[])
+        ) 
