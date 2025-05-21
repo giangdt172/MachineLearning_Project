@@ -22,7 +22,10 @@ from .code_analyzer import (
 from .method_extractor import (
     extract_methods_for_specific_file_from_enhanced_json,
     build_method_call_tree,
-    flatten_method_call_tree
+    flatten_method_call_tree,
+    find_method_across_files,
+    get_cross_file_dependencies,
+    extract_all_related_methods
 )
 from models.model import CodeClassifier
 from .llm_completion import LLMCompletionHandler
@@ -297,6 +300,27 @@ def create_application():
                             headers=["Method Name", "Relevance Score"],
                             datatype=["str", "str"]
                         )
+                        
+                    # Source Code Viewer Tab (New)
+                    with gr.Tab("Method Source Code"):
+                        with gr.Row():
+                            method_selector = gr.Dropdown(
+                                label="Select a method to view",
+                                choices=[],
+                                interactive=True
+                            )
+                            view_method_btn = gr.Button("View Method Code", variant="primary")
+                        method_source = gr.Code(
+                            label="Method Source Code",
+                            language="python",
+                            lines=15,
+                            interactive=False
+                        )
+                        method_description = gr.Textbox(
+                            label="Method Description",
+                            lines=3,
+                            interactive=False
+                        )
                     
                     # Code Completion Tab
                     with gr.Tab("Code Completion"):
@@ -316,6 +340,8 @@ def create_application():
                                 )
                             with gr.Tab("Call Paths"):
                                 call_paths = gr.Markdown("")
+                            with gr.Tab("Cross-File Dependencies"):
+                                cross_file_deps_md = gr.Markdown("")
 
         # Store file structure and temp_dir
         file_structure_state = gr.State(None)
@@ -402,13 +428,39 @@ def create_application():
                 relevant_methods_box,
                 call_tree_summary,
                 call_tree_relevance,
-                call_paths
+                call_paths,
+                cross_file_deps_md
             ]
         ).then(
-            # Switch to the Relevant Methods tab after checking relevance
+            # Update method_selector choices after checking relevance
+            lambda methods: gr.update(choices=[
+                get_method_display_name(m)
+                for m in methods
+            ]),
+            inputs=relevance_info_state,
+            outputs=method_selector
+        ).then(
+            # Auto-select the first method if available
+            lambda methods: methods[0].get("name") if methods and len(methods) > 0 else "",
+            inputs=relevance_info_state,
+            outputs=method_selector
+        ).then(
+            # Display the first method's code automatically
+            lambda method_name, methods: view_selected_method_code(get_method_display_name(methods[0]) if methods and len(methods) > 0 else "", methods),
+            inputs=[method_selector, relevance_info_state],
+            outputs=[method_source, method_description]
+        ).then(
+            # Switch to the Relevant Methods tab
             lambda: 0,  # Return tab index 0 (Relevant Methods tab)
             inputs=None,
             outputs=results_tabs
+        )
+        
+        # Add back the view method button handler
+        view_method_btn.click(
+            view_selected_method_code,
+            inputs=[method_selector, relevance_info_state],
+            outputs=[method_source, method_description]
         )
         
         # Event handler for function completion
@@ -479,7 +531,8 @@ def check_function_relevance_to_file(selected_path, signature, docstring, json_p
             [],  # empty dataframe
             "",  # empty call tree summary
             [],  # empty call tree relevance
-            ""   # empty call paths
+            "",  # empty call paths
+            ""   # empty cross-file dependencies
         )
     
     # Extract the function name from signature
@@ -503,27 +556,40 @@ def check_function_relevance_to_file(selected_path, signature, docstring, json_p
                     [],  # empty dataframe
                     "",  # empty call tree summary
                     [],  # empty call tree relevance
-                    ""   # empty call paths
+                    "",  # empty call paths
+                    ""   # empty cross-file dependencies
                 )
         
-        # Extract methods from the selected file's JSON entry
-        methods = extract_methods_for_specific_file_from_enhanced_json(json_path, selected_path)
+        # Extract ALL related methods (file methods, outgoing calls, noise)
+        related_methods = extract_all_related_methods(json_path, selected_path)
         
-        if not methods:
-            return (
-                gr.update(value="<div style='color: orange;'>No methods found in the selected file</div>"),
-                [],  # relevant_methods will be empty
-                [],  # empty dataframe
-                "",  # empty call tree summary
-                [],  # empty call tree relevance
-                ""   # empty call paths
-            )
+        # Initialize results containers
+        all_relevant_methods = []
+        relevance_counts = {
+            'file': {'relevant': 0, 'total': 0},
+            'outgoing_calls': {'relevant': 0, 'total': 0},
+            'noise': {'relevant': 0, 'total': 0}
+        }
         
-        # Check relevance of each method
-        relevant_methods = []
-        relevant_count = 0
+        # Create a set to track processed methods to avoid duplicates
+        processed_methods = set()
         
-        for method in methods:
+        # Helper function to generate a unique identifier for a method
+        def get_method_id(method):
+            name = method.get("name", "")
+            file_path = method.get("file_path", "")
+            return f"{name}@{file_path}"
+        
+        # Process file methods (these are always unique)
+        file_methods = related_methods.get('file_methods', [])
+        relevance_counts['file']['total'] = len(file_methods)
+        
+        for method in file_methods:
+            method_id = get_method_id(method)
+            if method_id in processed_methods:
+                continue
+                
+            processed_methods.add(method_id)
             input_ref_ = f"{anchor}\n</s>\n{method}"
             pred_class, logits = code_classifier.predict_text(input_ref_)
             
@@ -536,154 +602,346 @@ def check_function_relevance_to_file(selected_path, signature, docstring, json_p
                 "relevance_score": logits_value,
                 "is_relevant": pred_class == 1,
                 "code": method.get("code", ""),
-                "description": method.get("description", "")
+                "description": method.get("description", ""),
+                "file_path": selected_path,
+                "ref_type": "file_method",
+                "outgoing_calls": method.get("outgoing_calls", {})
             }
-            relevant_methods.append(method_relevance)
+            all_relevant_methods.append(method_relevance)
             
             if pred_class == 1:
-                relevant_count += 1
+                relevance_counts['file']['relevant'] += 1
         
-        # Sort methods by relevance score in descending order
-        relevant_methods.sort(key=lambda x: x["relevance_score"], reverse=True)
+        # Process outgoing call methods (deduplicate)
+        outgoing_methods = related_methods.get('outgoing_calls_methods', [])
+        unique_outgoing_methods = []
+        
+        for method in outgoing_methods:
+            method_id = get_method_id(method)
+            if method_id not in processed_methods:
+                processed_methods.add(method_id)
+                unique_outgoing_methods.append(method)
+        
+        relevance_counts['outgoing_calls']['total'] = len(unique_outgoing_methods)
+        
+        for method in unique_outgoing_methods:
+            input_ref_ = f"{anchor}\n</s>\n{method}"
+            pred_class, logits = code_classifier.predict_text(input_ref_)
+            
+            logits_value = logits[0, 1].item()
+            method_name = f"{method['name']} ({method['file_path']})"
+            
+            method_relevance = {
+                "name": method_name,
+                "relevance_score": logits_value,
+                "is_relevant": pred_class == 1,
+                "code": method.get("code", ""),
+                "description": method.get("description", ""),
+                "file_path": method.get("file_path", ""),
+                "ref_type": method.get("ref_type", "outgoing_call_method")
+            }
+            all_relevant_methods.append(method_relevance)
+            
+            if pred_class == 1:
+                relevance_counts['outgoing_calls']['relevant'] += 1
+        
+        # Process noise methods (deduplicate)
+        noise_methods = related_methods.get('noise_methods', [])
+        unique_noise_methods = []
+        
+        for method in noise_methods:
+            method_id = get_method_id(method)
+            if method_id not in processed_methods:
+                processed_methods.add(method_id)
+                unique_noise_methods.append(method)
+                
+        relevance_counts['noise']['total'] = len(unique_noise_methods)
+        
+        for method in unique_noise_methods:
+            input_ref_ = f"{anchor}\n</s>\n{method}"
+            pred_class, logits = code_classifier.predict_text(input_ref_)
+            
+            logits_value = logits[0, 1].item()
+            method_name = f"{method['name']} ({method['file_path']})"
+            
+            method_relevance = {
+                "name": method_name,
+                "relevance_score": logits_value,
+                "is_relevant": pred_class == 1,
+                "code": method.get("code", ""),
+                "description": method.get("description", ""),
+                "file_path": method.get("file_path", ""),
+                "ref_type": method.get("ref_type", "noise_method")
+            }
+            all_relevant_methods.append(method_relevance)
+            
+            if pred_class == 1:
+                relevance_counts['noise']['relevant'] += 1
+        
+        # Sort all methods by relevance score in descending order
+        all_relevant_methods.sort(key=lambda x: x["relevance_score"], reverse=True)
         
         # Prepare data for display
         display_data = []
-        for method in relevant_methods[:10]:  # Show top 10 methods
+        for method in all_relevant_methods[:20]:  # Show top 20 methods
+            ref_type = method.get("ref_type", "unknown")
+            # Format method name to show its category
+            if "outgoing_call" in ref_type:
+                category = "Outgoing Call"
+            elif "noise" in ref_type:
+                category = "Dependency"
+            else:
+                category = "In-file Method"
+                
             display_data.append([
-                method["name"],
+                f"{method['name']} ({category})",
                 f"{method['relevance_score']:.4f}" if isinstance(method['relevance_score'], (int, float)) else str(method['relevance_score'])
             ])
         
-        # Determine if there are enough relevant methods
-        relevance_threshold = 0.3  # 30% of methods should be relevant
-        has_enough_relevant = relevant_count >= len(methods) * relevance_threshold
+        # Create the relevance message with summary of all categories
+        total_relevant = sum(cat['relevant'] for cat in relevance_counts.values())
+        total_methods = sum(cat['total'] for cat in relevance_counts.values())
         
-        # Create the relevance message
+        relevance_threshold = 0.3  # 30% of methods should be relevant
+        has_enough_relevant = total_relevant >= total_methods * relevance_threshold
+        
         if has_enough_relevant:
             color = "green"
-            message = f"✅ Relevant! Found {relevant_count} out of {len(methods)} relevant methods"
+            message = "✅ Relevant!"
         else:
             color = "red"
-            message = f"❌ Not relevant! Only found {relevant_count} out of {len(methods)} relevant methods"
+            message = "❌ Not relevant!"
+            
+        # Create detailed breakdown
+        breakdown = f"Found {total_relevant} out of {total_methods} relevant methods<br>"
+        breakdown += f"- In-file methods: {relevance_counts['file']['relevant']}/{relevance_counts['file']['total']}<br>"
+        breakdown += f"- Outgoing calls: {relevance_counts['outgoing_calls']['relevant']}/{relevance_counts['outgoing_calls']['total']}<br>"
+        breakdown += f"- Dependency references: {relevance_counts['noise']['relevant']}/{relevance_counts['noise']['total']}"
         
-        relevance_html = f"<div style='color: {color}; font-weight: bold;'>{message}</div>"
+        relevance_html = f"<div style='color: {color}; font-weight: bold;'>{message}</div>{breakdown}"
         
-        # Build call tree for the most relevant method
+        # Reuse most relevant method to build call tree (from in-file methods)
         call_tree_data = []
         call_tree_relevance_data = []
         call_paths_html = ""
+        cross_file_deps_html = ""
         
-        if relevant_methods and relevant_count > 0:
-            # Get the most relevant method
-            most_relevant = relevant_methods[0]["name"]
-            most_relevant_method = next((m for m in methods if m["name"] == most_relevant), None)
-            
-            if most_relevant_method:
-                # Build call tree with depth 2
-                call_trees = build_method_call_tree(json_path, selected_path, depth=2)
+        # Find most relevant in-file method for call tree analysis
+        most_relevant = None
+        for method in all_relevant_methods:
+            if method.get("ref_type") == "file_method":
+                most_relevant = method
+                break
                 
-                if call_trees:
-                    # Find the call tree for the most relevant method
-                    target_tree = next((tree for tree in call_trees if tree["name"] == most_relevant), call_trees[0])
+        if most_relevant:
+            # Build call tree with depth 2
+            call_trees = build_method_call_tree(json_path, selected_path, depth=2)
+            
+            if call_trees:
+                # Find the call tree for the most relevant method
+                target_tree = next((tree for tree in call_trees if tree["name"] == most_relevant["name"]), call_trees[0])
+                
+                # Find cross-file dependencies for this method
+                cross_file_deps = get_cross_file_dependencies(json_path, target_tree)
+                
+                # Generate summary
+                call_tree_summary_html = f"<h4>Call Tree for {target_tree['name']}</h4>"
+                
+                # Add cross-file dependencies section
+                if cross_file_deps["functions"] or cross_file_deps["classes"]:
+                    call_tree_summary_html += f"<h5>Cross-file Dependencies:</h5>"
+                    call_tree_summary_html += "<ul>"
                     
-                    # Generate summary
-                    call_tree_summary_html = f"<h4>Call Tree for {target_tree['name']}</h4>"
-                    if "called_methods" in target_tree and target_tree["called_methods"]:
-                        # Group by file path
-                        methods_by_file = {}
-                        for called in target_tree["called_methods"]:
-                            file_path = called.get("file_path", "unknown")
-                            if file_path not in methods_by_file:
-                                methods_by_file[file_path] = []
-                            methods_by_file[file_path].append(called)
-                        
-                        # Build summary HTML
-                        for file_path, methods_list in methods_by_file.items():
+                    for func in cross_file_deps["functions"]:
+                        if "@" in func:
+                            name_part, file_path = func.split("@", 1)
+                            call_tree_summary_html += f"<li><strong>Function:</strong> {name_part} <em>(from {file_path})</em></li>"
+                    
+                    for cls in cross_file_deps["classes"]:
+                        if "@" in cls:
+                            name_part, file_path = cls.split("@", 1)
+                            call_tree_summary_html += f"<li><strong>Class:</strong> {name_part} <em>(from {file_path})</em></li>"
+                    
+                    call_tree_summary_html += "</ul>"
+                
+                if "called_methods" in target_tree and target_tree["called_methods"]:
+                    # Group by file path
+                    methods_by_file = {}
+                    for called in target_tree["called_methods"]:
+                        file_path = called.get("file_path", "unknown")
+                        if file_path not in methods_by_file:
+                            methods_by_file[file_path] = []
+                        methods_by_file[file_path].append(called)
+                    
+                    # Build summary HTML
+                    for file_path, methods_list in methods_by_file.items():
+                        if file_path == selected_path:
+                            call_tree_summary_html += f"<p><strong>From current file ({len(methods_list)} methods):</strong></p><ul>"
+                        else:
                             call_tree_summary_html += f"<p><strong>From {file_path} ({len(methods_list)} methods):</strong></p><ul>"
-                            for method in methods_list:
-                                method_type = method.get("method_type", "")
-                                if method_type == "class":
-                                    call_tree_summary_html += f"<li>{method['name']} (Class)</li>"
-                                else:
-                                    call_tree_summary_html += f"<li>{method['name']}</li>"
-                            call_tree_summary_html += "</ul>"
-                    else:
-                        call_tree_summary_html += "<p>No method calls found.</p>"
-                    
-                    # Evaluate relevance for each method in the call tree
-                    def evaluate_method_relevance(method, anchor, model):
-                        """Evaluate the relevance of a method against an anchor using the model."""
-                        # Check if method has all the required fields
-                        if all(field in method for field in ["name", "description", "code"]):
-                            # Create input reference using the same format as the initial relevance check
-                            input_ref = f"{anchor}\n</s>\n{method}"
                             
-                            # Predict using the model
-                            try:
-                                pred_class, logits = model.predict_text(input_ref)
-        
+                        for method in methods_list:
+                            method_type = method.get("method_type", "")
+                            if method_type == "class":
+                                call_tree_summary_html += f"<li>{method['name']} (Class)</li>"
+                            else:
+                                call_tree_summary_html += f"<li>{method['name']}</li>"
+                        call_tree_summary_html += "</ul>"
+                else:
+                    call_tree_summary_html += "<p>No method calls found.</p>"
+                
+                # Evaluate relevance for each method in the call tree
+                def evaluate_method_relevance(method, anchor, model):
+                    """Evaluate the relevance of a method against an anchor using the model."""
+                    # Check if method has all the required fields
+                    if all(field in method for field in ["name", "description", "code"]):
+                        # Create input reference using the same format as the initial relevance check
+                        input_ref = f"{anchor}\n</s>\n{method}"
+                        
+                        # Predict using the model
+                        try:
+                            pred_class, logits = model.predict_text(input_ref)
+    
+                            
+                            relevance_score = logits[0, 1].item()
+                            relevance = "Relevant" if pred_class == 1 else "Not relevant"
+                            
+                            # Include file path in the display for cross-file references
+                            method_display = method["name"]
+                            if method.get("file_path") and method.get("file_path") != selected_path:
+                                method_display = f"{method['name']} ({method['file_path']})"
+                            
+                            return {
+                                "method": method_display,
+                                "relevance": relevance,
+                                "score": relevance_score
+                            }
+                        except Exception as e:
+                            return {
+                                "method": method["name"],
+                                "relevance": "Error",
+                                "score": str(e)
+                            }
+                    return None
+                
+                # Process all methods in the call tree
+                methods_to_process = [target_tree]
+                all_relevance_results = []
+                processed_call_tree_methods = set()  # Track processed methods
+                
+                if "called_methods" in target_tree:
+                    methods_to_process.extend(target_tree["called_methods"])
+                
+                for method in methods_to_process:
+                    # Create a unique identifier for the method
+                    method_identifier = f"{method.get('name', '')}@{method.get('file_path', '')}"
+                    if method_identifier in processed_call_tree_methods:
+                        continue
+                        
+                    processed_call_tree_methods.add(method_identifier)
+                    result = evaluate_method_relevance(method, anchor, code_classifier)
+                    if result:
+                        all_relevance_results.append(result)
+                
+                # Sort by score in descending order
+                all_relevance_results.sort(key=lambda x: x["score"] if isinstance(x["score"], (int, float)) else 0, reverse=True)
+                
+                # Prepare for display
+                for result in all_relevance_results:
+                    call_tree_relevance_data.append([
+                        result["method"],
+                        result["relevance"],
+                        f"{result['score']:.4f}" if isinstance(result["score"], (int, float)) else str(result["score"])
+                    ])
+                
+                # Generate call paths visualization
+                flat_paths = flatten_method_call_tree(target_tree)
+                call_paths_html = f"<h4>Call Paths for {target_tree['name']}</h4>"
+                if flat_paths:
+                    call_paths_html += "<ul>"
+                    for i, path in enumerate(flat_paths, 1):
+                        # Create a path string that shows file paths for cross-file methods
+                        path_elements = []
+                        for m in path:
+                            if m.get("file_path") and m.get("file_path") != selected_path:
+                                path_elements.append(f"{m['name']} ({m['file_path']})")
+                            else:
+                                path_elements.append(m['name'])
+                        path_str = " → ".join(path_elements)
+                        call_paths_html += f"<li>Path {i}: {path_str}</li>"
+                    call_paths_html += "</ul>"
+                else:
+                    call_paths_html += "<p>No call paths found.</p>"
+                
+                call_tree_data = call_trees
+                
+                # Create a detailed cross-file dependencies section
+                cross_file_deps_html = f"<h4>Cross-File Dependencies for {target_tree['name']}</h4>"
+                
+                if cross_file_deps["functions"] or cross_file_deps["classes"]:
+                    # Process and display functions from other files
+                    if cross_file_deps["functions"]:
+                        cross_file_deps_html += "<h5>Functions in Other Files:</h5>"
+                        cross_file_deps_html += "<ul>"
+                        
+                        # Deduplicate functions
+                        unique_funcs = set()
+                        for func in cross_file_deps["functions"]:
+                            if func not in unique_funcs:
+                                unique_funcs.add(func)
                                 
-                                relevance_score = logits[0, 1].item()
-                                relevance = "Relevant" if pred_class == 1 else "Not relevant"
+                        for func in unique_funcs:
+                            if "@" in func:
+                                name_part, file_path = func.split("@", 1)
+                                # Try to get more details about the function
+                                methods_list = find_method_across_files(json_path, name_part)
+                                if methods_list:
+                                    method = next((m for m in methods_list if m["file_path"] == file_path), None)
+                                    if method:
+                                        desc = method.get("description", "").strip()
+                                        desc_preview = desc[:100] + "..." if len(desc) > 100 else desc
+                                        code_preview = method.get("code", "").strip()
+                                        code_preview = code_preview[:100] + "..." if len(code_preview) > 100 else code_preview
+                                        
+                                        cross_file_deps_html += f"<li><strong>{name_part}</strong> from <em>{file_path}</em>"
+                                        cross_file_deps_html += f"<br><strong>Description:</strong> {desc_preview}"
+                                        cross_file_deps_html += f"<br><strong>Code:</strong><pre>{code_preview}</pre></li>"
+                                    else:
+                                        cross_file_deps_html += f"<li><strong>{name_part}</strong> from <em>{file_path}</em></li>"
+                                else:
+                                    cross_file_deps_html += f"<li><strong>{name_part}</strong> from <em>{file_path}</em></li>"
+                    
+                        cross_file_deps_html += "</ul>"
+                    
+                    # Process and display classes from other files - deduplicate
+                    if cross_file_deps["classes"]:
+                        cross_file_deps_html += "<h5>Classes in Other Files:</h5>"
+                        cross_file_deps_html += "<ul>"
+                        
+                        # Deduplicate classes
+                        unique_classes = set()
+                        for cls in cross_file_deps["classes"]:
+                            if cls not in unique_classes:
+                                unique_classes.add(cls)
                                 
-                                return {
-                                    "method": method["name"],
-                                    "relevance": relevance,
-                                    "score": relevance_score
-                                }
-                            except Exception as e:
-                                return {
-                                    "method": method["name"],
-                                    "relevance": "Error",
-                                    "score": str(e)
-                                }
-                        return None
-                    
-                    # Process all methods in the call tree
-                    methods_to_process = [target_tree]
-                    all_relevance_results = []
-                    
-                    if "called_methods" in target_tree:
-                        methods_to_process.extend(target_tree["called_methods"])
-                    
-                    for method in methods_to_process:
-                        result = evaluate_method_relevance(method, anchor, code_classifier)
-                        if result:
-                            all_relevance_results.append(result)
-                    
-                    # Sort by score in descending order
-                    all_relevance_results.sort(key=lambda x: x["score"] if isinstance(x["score"], (int, float)) else 0, reverse=True)
-                    
-                    # Prepare for display
-                    for result in all_relevance_results:
-                        call_tree_relevance_data.append([
-                            result["method"],
-                            result["relevance"],
-                            f"{result['score']:.4f}" if isinstance(result["score"], (int, float)) else str(result["score"])
-                        ])
-                    
-                    # Generate call paths visualization
-                    flat_paths = flatten_method_call_tree(target_tree)
-                    call_paths_html = f"<h4>Call Paths for {target_tree['name']}</h4>"
-                    if flat_paths:
-                        call_paths_html += "<ul>"
-                        for i, path in enumerate(flat_paths, 1):
-                            path_str = " → ".join(m["name"] for m in path)
-                            call_paths_html += f"<li>Path {i}: {path_str}</li>"
-                        call_paths_html += "</ul>"
-                    else:
-                        call_paths_html += "<p>No call paths found.</p>"
-                    
-                    call_tree_data = call_trees
+                        for cls in unique_classes:
+                            if "@" in cls:
+                                name_part, file_path = cls.split("@", 1)
+                                cross_file_deps_html += f"<li><strong>{name_part}</strong> from <em>{file_path}</em></li>"
+                        
+                        cross_file_deps_html += "</ul>"
+                else:
+                    cross_file_deps_html += "<p>No cross-file dependencies found for this method.</p>"
         
-        # Return the data for the UI components - no visibility updates needed
+        # Return the data for the UI components
         return (
             gr.update(value=relevance_html),
-            relevant_methods,
+            all_relevant_methods,
             display_data,
             call_tree_summary_html if 'call_tree_summary_html' in locals() else "",
             call_tree_relevance_data,
-            call_paths_html
+            call_paths_html,
+            cross_file_deps_html if 'cross_file_deps_html' in locals() else ""
         )
         
     except Exception as e:
@@ -697,7 +955,8 @@ def check_function_relevance_to_file(selected_path, signature, docstring, json_p
             [],  # empty dataframe
             "",  # empty call tree summary
             [],  # empty call tree relevance
-            ""   # empty call paths
+            "",  # empty call paths
+            ""   # empty cross-file dependencies
         )
 
 def complete_function(signature, docstring, relevant_methods):
@@ -730,4 +989,48 @@ def complete_function(signature, docstring, relevant_methods):
         return (
             f"```\n# Exception occurred: {str(e)}\n```",
             f"Exception: {str(e)}"
-        ) 
+        )
+
+def view_selected_method_code(method_name, relevant_methods):
+    """Display the source code and description of a selected method."""
+    if not method_name or not relevant_methods:
+        return "", ""
+    
+    # Find the method in the relevant methods list
+    selected_method = None
+    for method in relevant_methods:
+        # Generate display name using the same function for consistency
+        display_name = get_method_display_name(method)
+        if display_name == method_name:
+            selected_method = method
+            break
+    
+    if selected_method:
+        code = selected_method.get("code", "# No code available")
+        description = selected_method.get("description", "No description available")
+        file_path = selected_method.get("file_path", "unknown")
+        
+        # Add file path to description for context
+        if file_path:
+            description = f"From: {file_path}\n\n{description}"
+            
+        return code, description
+    
+    return "# Method not found", "Method not found"
+
+def get_method_display_name(method):
+    """Format method name for display with category indicator."""
+    ref_type = method.get("ref_type", "unknown")
+    name = method.get("name", "")
+    
+    # If name already contains file path (for outgoing calls and noise methods)
+    if " (" in name and ")" in name.split(" (")[-1]:
+        return name
+    
+    # Add category based on ref_type
+    if "outgoing_call" in ref_type:
+        return f"{name} (Outgoing Call)"
+    elif "noise" in ref_type:
+        return f"{name} (Dependency)"
+    else:
+        return f"{name} (In-file Method)" 
