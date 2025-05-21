@@ -432,28 +432,32 @@ def create_application():
                 cross_file_deps_md
             ]
         ).then(
+            # Debug the available methods
+            lambda methods: debug_method_selector("", methods),
+            inputs=[relevance_info_state],
+            outputs=[]
+        ).then(
             # Update method_selector choices after checking relevance
             lambda methods: gr.update(choices=[
-                get_method_display_name(m)
-                for m in methods
+                get_method_display_name(m) for m in methods
             ]),
             inputs=relevance_info_state,
             outputs=method_selector
         ).then(
-            # Auto-select the first method if available
-            lambda methods: methods[0].get("name") if methods and len(methods) > 0 else "",
+            # Auto-select the first method if available - use a safer approach
+            lambda methods: gr.update(value=get_method_display_name(methods[0]) if methods and len(methods) > 0 else ""),
             inputs=relevance_info_state,
             outputs=method_selector
         ).then(
+            # Debug the selected method
+            lambda method_name, methods: debug_method_selector(method_name, methods),
+            inputs=[method_selector, relevance_info_state],
+            outputs=[]
+        ).then(
             # Display the first method's code automatically
-            lambda method_name, methods: view_selected_method_code(get_method_display_name(methods[0]) if methods and len(methods) > 0 else "", methods),
+            lambda method_name, methods: view_selected_method_code(method_name, methods),
             inputs=[method_selector, relevance_info_state],
             outputs=[method_source, method_description]
-        ).then(
-            # Switch to the Relevant Methods tab
-            lambda: 0,  # Return tab index 0 (Relevant Methods tab)
-            inputs=None,
-            outputs=results_tabs
         )
         
         # Add back the view method button handler
@@ -475,11 +479,6 @@ def create_application():
                 code_completion_output,
                 export_status
             ]
-        ).then(
-            # Switch to the Code Completion tab after generating code
-            lambda: 1,  # Return tab index 1 (Code Completion tab)
-            inputs=None,
-            outputs=results_tabs
         )
         
         return app
@@ -973,19 +972,44 @@ def complete_function(signature, docstring, relevant_methods):
         result = llm_handler.complete_function(signature, docstring, relevant_methods)
         
         if result.get("success", False):
+            # Format the code nicely for display
+            generated_code = result["code"]
+            
+            # Add context information if available
+            context_info = ""
+            if "context" in result:
+                ctx = result["context"]
+                context_info = f"Generated with context from {ctx.get('in_file_methods', 0)} in-file methods, "
+                context_info += f"{ctx.get('outgoing_calls', 0)} outgoing calls, and "
+                context_info += f"{ctx.get('dependencies', 0)} dependencies."
+                
             return (
-                result["code"],
-                "Code generation successful"
+                generated_code,
+                f"Code generation successful. {context_info}"
             )
         else:
             error_msg = result.get("error", "Unknown error")
+            context_info = ""
+            
+            # Add context for error cases too
+            if "context" in result:
+                ctx = result["context"]
+                context_info = f" Available context: {ctx.get('in_file_methods', 0)} in-file methods, "
+                context_info += f"{ctx.get('outgoing_calls', 0)} outgoing calls, and "
+                context_info += f"{ctx.get('dependencies', 0)} dependencies."
+                
+            if "traceback" in result:
+                # Don't show traceback to user, but log it
+                print(f"Error traceback: {result['traceback']}")
+                
             return (
                 f"```\n# Error: {error_msg}\n```",
-                f"Failed to generate code: {error_msg}"
+                f"Failed to generate code: {error_msg}{context_info}"
             )
     except Exception as e:
         import traceback
-        traceback.print_exc()
+        traceback_str = traceback.format_exc()
+        print(f"Exception in complete_function UI handler: {traceback_str}")
         return (
             f"```\n# Exception occurred: {str(e)}\n```",
             f"Exception: {str(e)}"
@@ -993,13 +1017,12 @@ def complete_function(signature, docstring, relevant_methods):
 
 def view_selected_method_code(method_name, relevant_methods):
     """Display the source code and description of a selected method."""
-    if not method_name or not relevant_methods:
-        return "", ""
+    if not method_name or not relevant_methods or len(relevant_methods) == 0:
+        return "# No method selected or available", "No method selected or available"
     
     # Find the method in the relevant methods list
     selected_method = None
     for method in relevant_methods:
-        # Generate display name using the same function for consistency
         display_name = get_method_display_name(method)
         if display_name == method_name:
             selected_method = method
@@ -1016,12 +1039,19 @@ def view_selected_method_code(method_name, relevant_methods):
             
         return code, description
     
-    return "# Method not found", "Method not found"
+    return f"# Method '{method_name}' not found in the available methods", f"Method '{method_name}' not found in the available methods"
 
 def get_method_display_name(method):
     """Format method name for display with category indicator."""
+    if not method:
+        print("Warning: get_method_display_name called with None value")
+        return "Unknown method"
+        
     ref_type = method.get("ref_type", "unknown")
     name = method.get("name", "")
+    
+    # Print debug info for troubleshooting
+    # print(f"Formatting method: name={name}, ref_type={ref_type}")
     
     # If name already contains file path (for outgoing calls and noise methods)
     if " (" in name and ")" in name.split(" (")[-1]:
@@ -1033,4 +1063,24 @@ def get_method_display_name(method):
     elif "noise" in ref_type:
         return f"{name} (Dependency)"
     else:
-        return f"{name} (In-file Method)" 
+        return f"{name} (In-file Method)"
+
+# Add a debug function that can be called in the event chain
+def debug_method_selector(method_name, relevant_methods):
+    """Debug function to print information about method selection."""
+    if not relevant_methods:
+        print("DEBUG: No relevant methods available")
+        return method_name
+        
+    print(f"DEBUG: Selected method name: '{method_name}'")
+    print(f"DEBUG: Available choices:")
+    
+    for i, method in enumerate(relevant_methods):
+        display_name = get_method_display_name(method)
+        print(f"  {i}: {display_name}")
+    
+    # Check if the selected method is in the choices
+    found = any(method_name == get_method_display_name(m) for m in relevant_methods)
+    print(f"DEBUG: Selected method found in choices: {found}")
+    
+    return method_name 
